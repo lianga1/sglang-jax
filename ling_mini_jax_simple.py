@@ -20,7 +20,7 @@ from transformers import PretrainedConfig
 
 from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.model_loader.loader import JAXModelLoader
-from sgl_jax.srt.utils.jax_utils import create_mesh
+# from sgl_jax.srt.utils.jax_utils import create_mesh
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def load_ling_mini_model(
     logger.info(f"  - Data type: {dtype}")
 
     # Create JAX mesh for parallel execution
-    mesh = create_mesh(mesh_shape=(1, 1), axis_names=("tensor", "expert"))
+    mesh = jax.make_mesh(axis_shapes=(1, 1), axis_names=("tensor", "expert"))
 
     # Initialize RNG
     rng = nnx.Rngs(jax.random.PRNGKey(42))
