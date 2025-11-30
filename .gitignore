@@ -241,3 +241,17 @@ CLAUDE.md
 
 #gemini code
 .gemini-clipboard
+inclusionAI/Ling-mini-2.0/config.json
+inclusionAI/Ling-mini-2.0/configuration_bailing_moe_v2.py
+inclusionAI/Ling-mini-2.0/generation_config.json
+inclusionAI/Ling-mini-2.0/model-00001-of-00004.safetensors
+inclusionAI/Ling-mini-2.0/model-00002-of-00004.safetensors
+inclusionAI/Ling-mini-2.0/model-00003-of-00004.safetensors
+inclusionAI/Ling-mini-2.0/model-00004-of-00004.safetensors
+inclusionAI/Ling-mini-2.0/model.safetensors.index.json
+inclusionAI/Ling-mini-2.0/modeling_bailing_moe_v2.py
+inclusionAI/Ling-mini-2.0/README.md
+inclusionAI/Ling-mini-2.0/special_tokens_map.json
+inclusionAI/Ling-mini-2.0/tokenizer_config.json
+inclusionAI/Ling-mini-2.0/tokenizer.json
+inclusionAI/Ling-mini-2.0/.gitattributes
