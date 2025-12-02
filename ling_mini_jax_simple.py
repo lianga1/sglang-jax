@@ -57,9 +57,11 @@ def load_ling_mini_model(
     logger.info(f"  - Vocab size: {model_config.vocab_size}")
     logger.info(f"  - Experts: {model_config.hf_config.num_experts} total, {model_config.hf_config.num_experts_per_tok} per token")
     logger.info(f"  - Data type: {dtype}")
+    logger.info(f"  - EP size :{model_config.ep_size}")
 
     # Create JAX mesh for parallel execution
-    mesh = jax.make_mesh(axis_shapes=(1, 1), axis_names=("tensor", "expert"))
+    import jax.sharding as shd
+    mesh = jax.make_mesh(axis_shapes=(4, 1), axis_names=("tensor", "expert"),axis_types=(shd.AxisType.Explicit, shd.AxisType.Explicit))
 
     # Initialize RNG
     rng = nnx.Rngs(jax.random.PRNGKey(42))

@@ -286,7 +286,7 @@ class BailingMoEDecoderLayer(nnx.Module):
                 num_experts_per_tok=config.num_experts_per_tok,
                 intermediate_dim=config.moe_intermediate_size,
                 mesh=mesh,
-                ep_size=config.ep_size,
+                ep_size=getattr(config, "ep_size", 1),
                 weight_dtype=dtype,
                 dtype=dtype,
                 layer_id=layer_id,
