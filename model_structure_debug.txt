@@ -1,0 +1,603 @@
+=== JAX Model State Dict Structure ===
+embedder/
+  embedding: (157184, 2048)
+final_norm/
+  scale: (2048,)
+layers/
+  0/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      down_proj/
+        w: (7168, 2048)
+      gate_proj/
+        w: (2048, 7168)
+      up_proj/
+        w: (2048, 7168)
+    post_attention_layernorm/
+      scale: (2048,)
+  1/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  2/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  3/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  4/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  5/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  6/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  7/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  8/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  9/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  10/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  11/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  12/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  13/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  14/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  15/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  16/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  17/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  18/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+  19/
+    attn/
+      k_norm/
+        scale: (128,)
+      k_proj/
+        w: (2048, 4, 128)
+      o_proj/
+        w: (16, 128, 2048)
+      q_norm/
+        scale: (128,)
+      q_proj/
+        w: (2048, 16, 128)
+      v_proj/
+        w: (2048, 4, 128)
+    input_layernorm/
+      scale: (2048,)
+    mlp/
+      experts_down_proj: (64, 7168, 2048)
+      experts_gate_proj: (64, 2048, 7168)
+      experts_up_proj: (64, 2048, 7168)
+      router: (2048, 64)
+      shared_expert/
+        down_proj/
+          w: (8192, 2048)
+        gate_proj/
+          w: (2048, 8192)
+        up_proj/
+          w: (2048, 8192)
+    post_attention_layernorm/
+      scale: (2048,)
+lm_head/
+  w: (2048, 157184)

@@ -85,7 +85,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
     
     # 1. Shared Expert (通常结构和普通 MLP 一样)
     mapping.update({
-        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.gate_proj\.weight": (r"layers.\1.moe.shared_expert.gate_proj.kernel", Transform.LINEAR),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.gate_proj\.weight": (r"layers.\1.mlp.shared_expert.gate_proj.kernel", Transform.LINEAR),
         
         r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.up_proj\.weight": (r"layers.\1.moe.shared_expert.up_proj.kernel", Transform.LINEAR),
         r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.down_proj\.weight": (r"layers.\1.moe.shared_expert.down_proj.kernel", Transform.LINEAR),
@@ -127,27 +127,13 @@ def _assign_weights(keys, tensor, state_dict, st_key, transform, sharding_dict):
     key, *rest = keys
     if not rest:
         if transform is not None:
-            # Handle MoE-specific transformations
-            if transform.name == "MOE_GATE":
-                # MoE gate weight: [emb_dim, num_experts] -> no transform needed
-                pass
-            elif transform.name == "MOE_EXPERT_GATE_UP":
-                # MoE expert gate_proj/up_proj: need to reshape from [num_experts, intermediate_dim, emb_dim] to [num_experts, emb_dim, intermediate_dim]
-                # This is a transpose of last two dimensions
-                tensor = tensor.transpose(0, 2, 1)
-            elif transform.name == "MOE_EXPERT_DOWN":
-                # MoE expert down_proj: [num_experts, intermediate_dim, emb_dim] -> reshape to [num_experts, intermediate_dim, emb_dim]
-                # Already in correct shape
-                pass
-            else:
-                # Standard transformations for dense models
-                permute, reshape, reshape_first = transform
-                if reshape_first and reshape is not None:
-                    tensor = tensor.reshape(reshape)
-                if permute:
-                    tensor = tensor.transpose(permute)
-                if not reshape_first and reshape is not None:
-                    tensor = tensor.reshape(reshape)
+            permute, reshape, reshape_first = transform
+            if reshape_first and reshape is not None:
+                tensor = tensor.reshape(reshape)
+            if permute:
+                tensor = tensor.transpose(permute)
+            if not reshape_first and reshape is not None:
+                tensor = tensor.reshape(reshape)
         if tensor.shape != state_dict[key].shape:
             raise ValueError(f"Shape mismatch for {st_key}: {tensor.shape} vs {state_dict[key].shape}")
         # Only apply sharding if sharding_dict is provided
@@ -159,6 +145,42 @@ def _assign_weights(keys, tensor, state_dict, st_key, transform, sharding_dict):
         next_sharding = sharding_dict[key] if sharding_dict is not None else None
         _assign_weights(rest, tensor, state_dict[key], st_key, transform, next_sharding)
 
+    
+    # key, *rest = keys
+    # if not rest:
+    #     if transform is not None:
+    #         # Handle MoE-specific transformations
+    #         if transform.name == "MOE_GATE":
+    #             # MoE gate weight: [emb_dim, num_experts] -> no transform needed
+    #             pass
+    #         elif transform.name == "MOE_EXPERT_GATE_UP":
+    #             # MoE expert gate_proj/up_proj: need to reshape from [num_experts, intermediate_dim, emb_dim] to [num_experts, emb_dim, intermediate_dim]
+    #             # This is a transpose of last two dimensions
+    #             tensor = tensor.transpose(0, 2, 1)
+    #         elif transform.name == "MOE_EXPERT_DOWN":
+    #             # MoE expert down_proj: [num_experts, intermediate_dim, emb_dim] -> reshape to [num_experts, intermediate_dim, emb_dim]
+    #             # Already in correct shape
+    #             pass
+    #         else:
+    #             # Standard transformations for dense models
+    #             permute, reshape, reshape_first = transform
+    #             if reshape_first and reshape is not None:
+    #                 tensor = tensor.reshape(reshape)
+    #             if permute:
+    #                 tensor = tensor.transpose(permute)
+    #             if not reshape_first and reshape is not None:
+    #                 tensor = tensor.reshape(reshape)
+    #     if tensor.shape != state_dict[key].shape:
+    #         raise ValueError(f"Shape mismatch for {st_key}: {tensor.shape} vs {state_dict[key].shape}")
+    #     # Only apply sharding if sharding_dict is provided
+    #     if sharding_dict is not None:
+    #         state_dict[key] = jax.device_put(tensor, sharding_dict[key])
+    #     else:
+    #         state_dict[key] = jax.device_put(tensor)
+    # else:
+    #     next_sharding = sharding_dict[key] if sharding_dict is not None else None
+    #     _assign_weights(rest, tensor, state_dict[key], st_key, transform, next_sharding)
+
 
 def _stoi(s):
     try:
@@ -169,14 +191,14 @@ def _stoi(s):
 
 def create_model_from_safe_tensors(
     file_dir: str, cfg: model_lib.ModelConfig, mesh: jax.sharding.Mesh | None = None
-) -> model_lib.Qwen3:
+) -> model_lib.Ling2_mini:
     """Load tensors from the safetensors file and create a Qwen3 model (memory-optimized)."""
     files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
     if not files:
         raise ValueError(f"No safetensors found in {file_dir}")
 
-    qwen3 = nnx.eval_shape(lambda: model_lib.Qwen3(cfg, rngs=nnx.Rngs(params=0)))
-    graph_def, abs_state = nnx.split(qwen3)
+    ling2_mini = nnx.eval_shape(lambda: model_lib.Ling2_mini(cfg, rngs=nnx.Rngs(params=0)))
+    graph_def, abs_state = nnx.split(ling2_mini)
     state_dict = abs_state.to_pure_dict()
     # Only use sharding if mesh is provided
     sharding = nnx.get_named_sharding(abs_state, mesh).to_pure_dict() if mesh is not None else None
