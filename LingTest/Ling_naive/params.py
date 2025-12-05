@@ -16,63 +16,97 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
         BIAS = None
         LINEAR = ((1, 0), None, False)
         EMBED = None
-        ATTN_Q = ((2, 0, 1), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), True)
-        ATTN_KV = ((2, 0, 1), (cfg.num_kv_heads, cfg.head_dim, cfg.emb_dim), True)
+        ATTN_QKV = ((2, 0, 1), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), True)
+        # ATTN_KV = ((2, 0, 1), (cfg.num_kv_heads, cfg.head_dim, cfg.emb_dim), True)
         ATTN_OUT = ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), False)
         SCALE = None
         # MoE transforms
-        MOE_GATE = None  # [emb_dim, num_experts] -> no transform needed
-        MOE_EXPERT_GATE_UP = None  # [num_experts, emb_dim, intermediate_dim] -> no transform needed
-        MOE_EXPERT_DOWN = None  # [num_experts, intermediate_dim, emb_dim] -> no transform needed
+#         MOE_GATE = None  # [emb_dim, num_experts] -> no transform needed
+#         MOE_EXPERT_GATE_UP = None  # [num_experts, emb_dim, intermediate_dim] -> no transform needed
+#         MOE_EXPERT_DOWN = None  # [num_experts, intermediate_dim, emb_dim] -> no transform needed
 
-    # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
+#     # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
+# # 注意：Qwen/DeepSeek 的 Router 输出通常是 [hidden, num_experts]，但也可能是反的，需核对
+        MOE_ROUTER = ((1, 0), None, False)
+        MOE_ROUTER_BIAS = None
+
+        # MoE Experts (Routed): 
+        # PyTorch 通常是: [num_experts * intermediate, hidden] 或者是 [num_experts, intermediate, hidden]
+        # JAX NNX 通常期望: [num_experts, in, out] 或 [num_experts, out, in]
+        # 假设 PyTorch 是合并的大矩阵 [num_experts * inter, hidden]，我们需要拆分并转置
+        # 目标: [num_experts, hidden, inter] (如果是做 Kernel)
+        # 变换步骤: 
+        # 1. Reshape first: [num_experts, inter, hidden]
+        # 2. Permute: (0, 2, 1) -> [num_experts, hidden, inter]
+        # MOE_EXPERT_UP = ((0, 2, 1), (cfg.num_experts, cfg.moe_intermediate_dim, cfg.emb_dim), True)
+        MOE_EXPERT_UP = ((1,0),(cfg.moe_intermediate_dim, cfg.emb_dim), False)
+        MOE_EXPERT_DOWN = ((1,0),(cfg.emb_dim, cfg.moe_intermediate_dim), False)
+        # Down proj: [num_experts * hidden, inter] -> [num_experts, inter, hidden]
+        # 目标: [num_experts, inter, hidden]
+        # 1. Reshape: [num_experts, hidden, inter]
+        # 2. Permute: (0, 2, 1) -> [num_experts, inter, hidden]
+        # MOE_EXPERT_DOWN = ((0, 2, 1), (cfg.num_experts, cfg.emb_dim, cfg.moe_intermediate_dim), True)
+
     mapping = {
-        r"model\.embed_tokens\.weight": ("embedder.embedding", Transform.EMBED),
-        r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (r"layers.\1.attn.q_proj.w", Transform.ATTN_Q),
-        r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (r"layers.\1.attn.k_proj.w", Transform.ATTN_KV),
-        r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (r"layers.\1.attn.v_proj.w", Transform.ATTN_KV),
-        r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (r"layers.\1.attn.o_proj.w", Transform.ATTN_OUT),
-        # mlp (dense)
-        r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (r"layers.\1.mlp.gate_proj.kernel", Transform.LINEAR),
-        r"model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (r"layers.\1.mlp.up_proj.kernel", Transform.LINEAR),
-        r"model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (r"layers.\1.mlp.down_proj.kernel", Transform.LINEAR),
-        r"model\.norm\.weight": ("final_norm.scale", Transform.SCALE),
-        # norms
-        r"model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (r"layers.\1.attn.q_norm.scale", Transform.SCALE),
-        r"model\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (r"layers.\1.attn.k_norm.scale", Transform.SCALE),
-        # layer norms (pre/post attention)
-        r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (r"layers.\1.input_layernorm.scale", Transform.SCALE),
-        r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
-            r"layers.\1.post_attention_layernorm.scale",
-            Transform.SCALE,
-        ),
+        # === 公共部分 (所有层都有 Attention 和 Norm) ===
+        r"model\.word_embeddings\.weight": ("embedder.embedding", Transform.EMBED),
         r"lm_head\.weight": ("lm_head.w", Transform.LINEAR),
+        r"model\.norm\.weight": ("final_norm.scale", Transform.SCALE),
+        
+        # 匹配所有层 (0-19) 的 Attention 和 Norm
+        # r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (r"layers.\1.attn.q_proj.w", Transform.ATTN_Q),
+        # r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (r"layers.\1.attn.k_proj.w", Transform.ATTN_KV),
+        # r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (r"layers.\1.attn.v_proj.w", Transform.ATTN_KV),
+        # r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (r"layers.\1.attn.o_proj.w", Transform.ATTN_OUT),
+        r"model\.layers\.([0-9]+)\.attention.dense\.weight": (r"layers.\1.attn.o_proj.w", Transform.ATTN_OUT),
+        r"model\.layers\.([0-9]+)\.attention\.query_key_value\.weight": (r"layers.\1.attn.qkv_proj", Transform.ATTN_QKV),
+        r"model\.layers\.([0-9]+)\.attention\.query_layernorm\.weight": (r"layers.\1.attn.q_norm.scale", Transform.SCALE),
+        r"model\.layers\.([0-9]+)\.attention\.key_layernorm\.weight": (r"layers.\1.attn.k_norm.scale", Transform.SCALE),
+        r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (r"layers.\1.input_layernorm.scale", Transform.SCALE),
+        r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (r"layers.\1.post_attention_layernorm.scale", Transform.SCALE),
+        # r"model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (r"layers.\1.attn.q_norm.scale", Transform.SCALE),
+        # r"model\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (r"layers.\1.attn.k_norm.scale", Transform.SCALE),
     }
 
-    # Add MoE mappings if MoE is enabled
-    if cfg.num_experts > 1:
-        mapping.update({
-            # MoE gate (router) - shape: [emb_dim, num_experts]
-            r"model\.layers\.([0-9]+)\.mlp\.gate\.weight": (
-                r"layers.\1.mlp.gate.gate",
-                Transform.MOE_GATE,
-            ),
-            # MoE expert gate_proj - shape: [num_experts, emb_dim, intermediate_dim]
-            r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
-                r"layers.\1.mlp.gate_proj.value",
-                Transform.MOE_EXPERT_GATE_UP,
-            ),
-            # MoE expert up_proj - shape: [num_experts, emb_dim, intermediate_dim]
-            r"model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
-                r"layers.\1.mlp.up_proj.value",
-                Transform.MOE_EXPERT_GATE_UP,
-            ),
-            # MoE expert down_proj - shape: [num_experts, intermediate_dim, emb_dim]
-            r"model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
-                r"layers.\1.mlp.down_proj.value",
-                Transform.MOE_EXPERT_DOWN,
-            ),
-        })
+    # === Layer 0: 普通 Dense MLP ===
+    # 使用具体的 '0' 来匹配第一层
+    mapping.update({
+        r"model\.layers\.0\.mlp\.gate_proj\.weight": (r"layers.0.mlp.gate_proj.kernel", Transform.LINEAR),
+        r"model\.layers\.0\.mlp\.up_proj\.weight": (r"layers.0.mlp.up_proj.kernel", Transform.LINEAR),
+        r"model\.layers\.0\.mlp\.down_proj\.weight": (r"layers.0.mlp.down_proj.kernel", Transform.LINEAR),
+    })
+
+    # === Layer 1 到 19: MoE layers ===
+    # 正则表达式: ([1-9]|1[0-9]) 匹配 1-9 和 10-19
+    # 假设 MoE 结构包含: 
+    # 1. Shared Expert (独立的一个 MLP)
+    # 2. Gate (Router)
+    # 3. Experts (堆叠的权重)
+    
+    # 1. Shared Expert (通常结构和普通 MLP 一样)
+    mapping.update({
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.gate_proj\.weight": (r"layers.\1.moe.shared_expert.gate_proj.kernel", Transform.LINEAR),
+        
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.up_proj\.weight": (r"layers.\1.moe.shared_expert.up_proj.kernel", Transform.LINEAR),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.down_proj\.weight": (r"layers.\1.moe.shared_expert.down_proj.kernel", Transform.LINEAR),
+    })
+
+    # 2. Router / Gate (根据输入选择 Expert)
+    # PyTorch key 常见为: mlp.gate.weight 或 mlp.router.weight
+    mapping.update({
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.gate\.weight": (r"layers.\1.moe.router.w", Transform.MOE_ROUTER),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.gate\.expert_bias": (r"layers.\1.moe.router.expert_bias", Transform.MOE_ROUTER_BIAS),
+    })
+
+    # 3. Routed Experts (256个专家)
+    # PyTorch key 常见为: mlp.experts.gate_proj.weight (如果它们是合并的大 Tensor)
+    # 或者 mlp.experts.0.gate_proj.weight (如果是分开的文件，这种情况比较少见，通常 safetensors 里是合并的)
+    mapping.update({
+        # 假设 PyTorch 里是合并的大矩阵: experts.gate_proj.weight
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.gate_proj\.weight": (r"layers.\1.moe.experts.gate_proj.kernel", Transform.MOE_EXPERT_UP),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.up_proj\.weight": (r"layers.\1.moe.experts.up_proj.kernel", Transform.MOE_EXPERT_UP),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.down_proj\.weight": (r"layers.\1.moe.experts.down_proj.kernel", Transform.MOE_EXPERT_DOWN),
+    })
 
     return mapping
 
