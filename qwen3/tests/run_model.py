@@ -24,8 +24,10 @@ from jax import P
 from jax.sharding import AxisType
 from transformers import AutoTokenizer
 
-from bonsai.models.qwen3 import modeling, params
-from bonsai.utils import GreedySampler, Sampler
+import sys
+# sys.path.append('../..')  # noqa
+from qwen3 import modeling, params
+from qwen3.sampler import Sampler
 
 
 def tokenize(tokenizer, input: list[str], shd: P | None = None):
@@ -44,7 +46,7 @@ def tokenize(tokenizer, input: list[str], shd: P | None = None):
 def run_model():
     # For sharding, you can use one of the following:
     model_ckpt_path = snapshot_download("Qwen/Qwen3-0.6B")
-    config = modeling.ModelConfig.qwen3_0_6b(use_sharding=False)
+    config = modeling.ModelConfig.qwen3_0_6b(use_sharding=True)
     mesh, batch_shd = None, None
 
     # Enable sharding below if you have mtuliple devices.
@@ -63,7 +65,7 @@ def run_model():
     tokens = tokenize(tokenizer, query, batch_shd)
     batch_size, token_len = tokens.shape
 
-    generate_steps = 32
+    generate_steps = 1000
     model = params.create_model_from_safe_tensors(model_ckpt_path, config, mesh)
     cache = model.init_cache(config, batch_size, token_len, generate_steps)
 

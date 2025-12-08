@@ -26,7 +26,7 @@ from jax.sharding import AxisType
 from transformers import AutoTokenizer
 
 import modeling
-import params
+import params2 as params
 from sampler import GreedySampler, Sampler
 
 
@@ -49,13 +49,13 @@ def run_model():
     model_ckpt_path = '/home/gcpuser/sky_workdir/sglang-jax/inclusionAI/Ling-mini-2.0'
     config = modeling.ModelConfig.ling_minimal(use_sharding=True)
     mesh, batch_shd = None, None
-
+    mesh = jax.make_mesh((2, 2), ("fsdp", "tp"), axis_types=(AxisType.Explicit, AxisType.Explicit))
     # Enable sharding below if you have mtuliple devices.
     # model_ckpt_path = snapshot_download("Qwen/Qwen3-4B")
     # config = modeling.ModelConfig.qwen3_4b(use_sharding=True)
     # mesh = jax.make_mesh((2, 2), ("fsdp", "tp"), axis_types=(AxisType.Explicit, AxisType.Explicit))
-    # batch_shd = P("fsdp", None)
-    # jax.set_mesh(mesh)
+    batch_shd = P("fsdp", None)
+    jax.set_mesh(mesh)
 
     query = [
         "Why is the sky blue instead of any other color like purple?",

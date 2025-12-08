@@ -21,7 +21,7 @@ import safetensors
 from etils import epath
 from flax import nnx
 
-from bonsai.models.qwen3 import modeling as model_lib
+from qwen3 import modeling as model_lib
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):

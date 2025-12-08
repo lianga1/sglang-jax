@@ -70,8 +70,10 @@ class ShardingCfg:
             # MoE Sharding
             gate_weight=P(None, None),  # Router通常较小，复制到所有设备
             # Expert Parallel (EP): 专家维度切分
-            expert_weight_edf=P("ep", "fsdp", "tp"), 
-            expert_weight_efd=P("ep", "tp", "fsdp"),
+            # expert_weight_edf=P("ep", "fsdp", "tp"), 
+            # expert_weight_efd=P("ep", "tp", "fsdp"),
+            expert_weight_edf=P("fsdp", "tp"),
+            expert_weight_efd=P("tp", "fsdp"),
         )
 
 
@@ -229,6 +231,7 @@ class Attention(nnx.Module):
         k = apply_rope(k, sin, cos)
 
         # Cache Update
+        # slice_indices = jnp.array([0, cache.cur_ind.value, 0, 0], dtype=jnp.bfloat16)
         slice_indices = (0, cache.cur_ind.value, 0, 0)
         cache.v_cache.value = jax.lax.dynamic_update_slice(cache.v_cache.value, v, slice_indices)
         cache.k_cache.value = jax.lax.dynamic_update_slice(cache.k_cache.value, k, slice_indices)
@@ -295,8 +298,15 @@ class MoEMLP(nnx.Module):
         self.hidden = cfg.moe_intermediate_dim # 使用 512
         
         # 1. Router (Gate)
+        # self.router = shard(
+        #     nnx.Param(nnx.initializers.normal()(rngs.params(), (self.dim, self.num_experts))),
+        #     cfg.shd_cfg.gate_weight
+        # )
+        init_fn = nnx.initializers.normal(stddev=0.02, dtype=jnp.bfloat16) 
+
+        # 1. Router
         self.router = shard(
-            nnx.Param(nnx.initializers.normal()(rngs.params(), (self.dim, self.num_experts))),
+            nnx.Param(init_fn(rngs.params(), (self.dim, self.num_experts))),
             cfg.shd_cfg.gate_weight
         )
         self.router_bias = None # 如果模型有bias需添加
@@ -309,15 +319,15 @@ class MoEMLP(nnx.Module):
         # 3. Routed Experts (Stacked)
         # weights: [Experts, In, Out] based on loading script logic
         self.experts_gate_proj = shard(
-            nnx.Param(nnx.initializers.normal()(rngs.params(), (self.num_experts, self.dim, self.hidden))),
+            nnx.Param(init_fn(rngs.params(), (self.num_experts, self.dim, self.hidden))),
             cfg.shd_cfg.expert_weight_edf
         )
         self.experts_up_proj = shard(
-            nnx.Param(nnx.initializers.normal()(rngs.params(), (self.num_experts, self.dim, self.hidden))),
+            nnx.Param(init_fn(rngs.params(), (self.num_experts, self.dim, self.hidden))),
             cfg.shd_cfg.expert_weight_edf
         )
         self.experts_down_proj = shard(
-            nnx.Param(nnx.initializers.normal()(rngs.params(), (self.num_experts, self.hidden, self.dim))),
+            nnx.Param(init_fn(rngs.params(), (self.num_experts, self.hidden, self.dim))),
             cfg.shd_cfg.expert_weight_efd
         )
 
@@ -366,10 +376,33 @@ class MoEMLP(nnx.Module):
             # 使用 take 获取对应专家的参数
             # shape: [B, T, D, F]
             # mode='fill' handles OOB if any, typically safe here
-            cur_gate_w = jnp.take(self.experts_gate_proj.value, expert_ids, axis=0)
-            cur_up_w = jnp.take(self.experts_up_proj.value, expert_ids, axis=0)
-            cur_down_w = jnp.take(self.experts_down_proj.value, expert_ids, axis=0)
+            # cur_gate_w = jnp.take(self.experts_gate_proj.value, expert_ids, axis=0)
+            # cur_up_w = jnp.take(self.experts_up_proj.value, expert_ids, axis=0)
+            # cur_down_w = jnp.take(self.experts_down_proj.value, expert_ids, axis=0)
+            axis_b = self.shd_cfg.act_btd[0] 
+            axis_t = self.shd_cfg.act_btd[1]
             
+            # Expert Weights sharding: [Experts, In, Out] -> 取后两个轴
+            # Gate/Up proj: [E, D, F]
+            axis_d = self.shd_cfg.expert_weight_edf[1] 
+
+            
+            # Down proj: [E, F, D]
+            axis_f_down = self.shd_cfg.expert_weight_efd[1]
+
+
+            # 构造 Target Sharding Specs
+            # Gate/Up 结果: [B, T, D, F]
+            spec_up = P(axis_b, axis_t, axis_d)
+            # Down 结果: [B, T, F, D]
+            spec_down = P(axis_b, axis_t, axis_f_down)
+
+            # 使用 .at[...].get(out_sharding=...) 替代 jnp.take
+            # 相当于: cur_gate_w = self.experts_gate_proj.value[expert_ids]
+            cur_gate_w = self.experts_gate_proj.value.at[expert_ids].get(out_sharding=spec_up)
+            cur_up_w = self.experts_up_proj.value.at[expert_ids].get(out_sharding=spec_up)
+            cur_down_w = self.experts_down_proj.value.at[expert_ids].get(out_sharding=spec_down)
+            # === FIX END ===
             # Forward Computation
             # x expanded: [B, T, 1, D] for broadcasting against [B, T, D, F]
             # but simpler: einsum
@@ -388,11 +421,11 @@ class MoEMLP(nnx.Module):
 
         # 循环 K 次并累加 (Scan is efficient here)
         # result: [K, B, T, D]
-        results = nnx.scan(
-            lambda _, i: (None, compute_per_k(i)),
-            variable_axes={}, # 无状态更新
-            length=self.k
-        )(None, jnp.arange(self.k))[1]
+        _, results = jax.lax.scan(
+            lambda carry, i: (carry, compute_per_k(i)), # 函数体
+            None,                                       # init carry
+            jnp.arange(self.k)                          # xs (要循环的序列)
+        )
         
         # Sum over K
         return jnp.sum(results, axis=0)
