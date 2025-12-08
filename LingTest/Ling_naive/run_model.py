@@ -47,7 +47,7 @@ def run_model():
     # For sharding, you can use one of the following:
     # model_ckpt_path = snapshot_download("Qwen/Qwen3-0.6B")
     model_ckpt_path = '/home/gcpuser/sky_workdir/sglang-jax/inclusionAI/Ling-mini-2.0'
-    config = modeling.ModelConfig.ling_minimal(use_sharding=False)
+    config = modeling.ModelConfig.ling_minimal(use_sharding=True)
     mesh, batch_shd = None, None
 
     # Enable sharding below if you have mtuliple devices.

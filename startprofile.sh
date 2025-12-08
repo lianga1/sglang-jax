@@ -2,7 +2,7 @@ conda deactivate
 source ./.venv/bin/activate
 pip install transformers 
 uv pip install libtpu
-uv pip install jaxtypings
+uv pip install jaxtyping
 chmod a+x ./hfd.sh
 
 alias hfd='./hfd.sh'
