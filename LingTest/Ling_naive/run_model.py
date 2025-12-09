@@ -28,7 +28,7 @@ from transformers import AutoTokenizer
 import modeling
 import params2 as params
 from sampler import GreedySampler, Sampler
-
+from jax import NamedSharding
 
 def tokenize(tokenizer, input: list[str], shd: P | None = None):
     pad_idx = tokenizer.pad_token_id
@@ -65,8 +65,11 @@ def run_model():
     tokenizer = AutoTokenizer.from_pretrained(model_ckpt_path)
     tokens = tokenize(tokenizer, query, batch_shd)
     batch_size, token_len = tokens.shape
-
-    generate_steps = 32
+    input_sharding = NamedSharding(mesh, P('fsdp', None))
+    
+    # 执行搬运
+    tokens = jax.device_put(tokens, input_sharding)
+    generate_steps = 1000
     model = params.create_model_from_safe_tensors(model_ckpt_path, config, mesh)
     cache = model.init_cache(config, batch_size, token_len, generate_steps)
 

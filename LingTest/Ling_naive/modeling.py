@@ -72,8 +72,8 @@ class ShardingCfg:
             # Expert Parallel (EP): 专家维度切分
             # expert_weight_edf=P("ep", "fsdp", "tp"), 
             # expert_weight_efd=P("ep", "tp", "fsdp"),
-            expert_weight_edf=P("fsdp", "tp"),
-            expert_weight_efd=P("tp", "fsdp"),
+            expert_weight_edf=P(None,"tp", None),
+            expert_weight_efd=P(None, None, "tp"),
         )
 
 
@@ -409,13 +409,13 @@ class MoEMLP(nnx.Module):
             # Gate & Up: [B, T, D] * [B, T, D, F] -> [B, T, F]
             # We use einsum to do the batched dot product
             
-            gate_out = jnp.einsum("btd,btdf->btf", x, cur_gate_w)
-            up_out = jnp.einsum("btd,btdf->btf", x, cur_up_w)
+            gate_out = jnp.einsum("btd,btdf->btf", x, cur_gate_w,out_sharding=spec_up)
+            up_out = jnp.einsum("btd,btdf->btf", x, cur_up_w,out_sharding=spec_up)
             
             hidden = nnx.silu(gate_out) * up_out
             
             # Down: [B, T, F] * [B, T, F, D] -> [B, T, D]
-            expert_out = jnp.einsum("btf,btfd->btd", hidden, cur_down_w)
+            expert_out = jnp.einsum("btf,btfd->btd", hidden, cur_down_w,out_sharding=spec_down)
             
             return expert_out * weights[..., None]
 
@@ -544,8 +544,8 @@ def forward(model: nnx.Module, cache: Cache, tokens: Array, pad_id: int) -> tupl
     target_ind = tokens.shape[-1] - num_right_pads - 1
     # Gather: logits[batch, target_ind]
     # We need advanced indexing
-    batch_inds = jnp.arange(tokens.shape[0])
-    last_logits = logits[batch_inds, target_ind, :]
+    batch_inds = jnp.arange(tokens.shape[0],out_sharding=P("fsdp",None))
+    last_logits = logits.at[batch_inds, target_ind, :].get(out_sharding=P("fsdp",None))
     
     return last_logits, cache
 # import dataclasses
