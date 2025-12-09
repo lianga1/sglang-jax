@@ -72,8 +72,8 @@ class ShardingCfg:
             # Expert Parallel (EP): 专家维度切分
             # expert_weight_edf=P("ep", "fsdp", "tp"), 
             # expert_weight_efd=P("ep", "tp", "fsdp"),
-            expert_weight_edf=P(None,"tp", None),
-            expert_weight_efd=P(None, None, "tp"),
+            expert_weight_edf=P("fsdp","tp", None),
+            expert_weight_efd=P("fsdp", None, "tp"),
         )
 
 
@@ -379,43 +379,45 @@ class MoEMLP(nnx.Module):
             # cur_gate_w = jnp.take(self.experts_gate_proj.value, expert_ids, axis=0)
             # cur_up_w = jnp.take(self.experts_up_proj.value, expert_ids, axis=0)
             # cur_down_w = jnp.take(self.experts_down_proj.value, expert_ids, axis=0)
-            axis_b = self.shd_cfg.act_btd[0] 
-            axis_t = self.shd_cfg.act_btd[1]
+            axis_b = self.shd_cfg.act_btd[0] # "fsdp"
+            axis_t = self.shd_cfg.act_btd[1] # None
             
-            # Expert Weights sharding: [Experts, In, Out] -> 取后两个轴
-            # Gate/Up proj: [E, D, F]
-            axis_d = self.shd_cfg.expert_weight_edf[1] 
-
+            # Up/Gate: [Experts, D, F] -> D is "tp"
+            axis_d_up = self.shd_cfg.expert_weight_edf[1] # "tp"
             
-            # Down proj: [E, F, D]
-            axis_f_down = self.shd_cfg.expert_weight_efd[1]
-
-
-            # 构造 Target Sharding Specs
-            # Gate/Up 结果: [B, T, D, F]
-            spec_up = P(axis_b, axis_t, axis_d)
-            # Down 结果: [B, T, F, D]
-            spec_down = P(axis_b, axis_t, axis_f_down)
-
-            # 使用 .at[...].get(out_sharding=...) 替代 jnp.take
-            # 相当于: cur_gate_w = self.experts_gate_proj.value[expert_ids]
+            # Down: [Experts, F, D] -> D is "tp" (注意这里取 index 2)
+            axis_d_down = self.shd_cfg.expert_weight_efd[2] # "tp"
+            
+            # 2. 构造完整的 4维 Spec
+            # cur_gate_w / cur_up_w: [B, T, D, F]
+            # 我们希望 D 保持切分 ("tp")，F 不切分 (None)
+            spec_up = P(axis_b, axis_t, axis_d_up, None)
+            
+            # cur_down_w: [B, T, F, D]
+            # [关键修正] 我们希望 F 不切分 (None)，D 保持切分 ("tp")
+            # 之前你漏了最后一个参数，导致 D 变成了 None (复制)
+            spec_down = P(axis_b, axis_t, None, axis_d_down)
+            
+            # 3. 执行 Gather
             cur_gate_w = self.experts_gate_proj.value.at[expert_ids].get(out_sharding=spec_up)
             cur_up_w = self.experts_up_proj.value.at[expert_ids].get(out_sharding=spec_up)
             cur_down_w = self.experts_down_proj.value.at[expert_ids].get(out_sharding=spec_down)
-            # === FIX END ===
-            # Forward Computation
-            # x expanded: [B, T, 1, D] for broadcasting against [B, T, D, F]
-            # but simpler: einsum
-            # Gate & Up: [B, T, D] * [B, T, D, F] -> [B, T, F]
-            # We use einsum to do the batched dot product
             
-            gate_out = jnp.einsum("btd,btdf->btf", x, cur_gate_w,out_sharding=spec_up)
-            up_out = jnp.einsum("btd,btdf->btf", x, cur_up_w,out_sharding=spec_up)
+            # 4. Einsum 计算
+            # 注意：spec_up 和 spec_down 也要传给 out_sharding 吗？
+            # 不，Einsum 的 out_sharding 是针对输出结果的。
+            # Gate/Up 输出 [B, T, F]，F 未切分 -> P("fsdp", None, None)
+            spec_out_intermediate = P(axis_b, axis_t, None)
+            
+            # Down 输出 [B, T, D]，D 切分 -> P("fsdp", None, "tp")
+            spec_out_final = P(axis_b, axis_t, axis_d_down)
+
+            gate_out = jnp.einsum("btd,btdf->btf", x, cur_gate_w,out_sharding=spec_out_intermediate) # JAX 自动推导即可，或指定 out_sharding=spec_out_intermediate
+            up_out = jnp.einsum("btd,btdf->btf", x, cur_up_w,out_sharding=spec_out_intermediate)
             
             hidden = nnx.silu(gate_out) * up_out
             
-            # Down: [B, T, F] * [B, T, F, D] -> [B, T, D]
-            expert_out = jnp.einsum("btf,btfd->btd", hidden, cur_down_w,out_sharding=spec_down)
+            expert_out = jnp.einsum("btf,btfd->btd", hidden, cur_down_w,out_sharding=spec_out_final) # 自动推导结果应为 "tp" 切分
             
             return expert_out * weights[..., None]
 

@@ -1,3 +1,291 @@
+# import gc
+# import re
+# import os
+# from enum import Enum
+# import jax
+# import jax.numpy as jnp
+# import numpy as np
+# import safetensors.numpy as safetensors
+# from etils import epath
+# from flax import nnx
+# import modeling as model_lib
+
+
+
+
+# def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
+#     class Transform(Enum):
+#         BIAS = None
+#         # PyTorch Linear 通常是 [out, in]，JAX 是 [in, out]，需要转置 (1, 0)
+#         LINEAR = ((1, 0), None, False) 
+#         EMBED = None
+#         # Attention: QKV 在这里定义基本规则，具体拆分在主循环逻辑中
+#         ATTN_QKV = ((2, 0, 1), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), True)
+#         ATTN_OUT = ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), False)
+#         SCALE = None
+        
+#         # MoE Router: PyTorch [hidden, experts] -> JAX [hidden, experts] (通常不需要转置，视具体模型而定)
+#         # 你的结构显示 router: (2048, 64)，如果 PyTorch 也是 (2048, 64) 则为 None；如果是 (64, 2048) 则为 (1,0)
+#         # Qwen/DeepSeek 通常 router 不需要转置，或者视 safetensors 实际形状而定。
+#         # 这里暂定 MOE_ROUTER = None，如果报错形状不匹配，改为 ((1, 0), None, False)
+#         # MOE_ROUTER = None 
+#         MOE_ROUTER_BIAS = None
+#         MOE_ROUTER = ((1, 0), None, False)
+#         # MoE Experts: 单个专家的权重处理
+#         # PyTorch 单个专家 Gate/Up: [intermediate, hidden] -> JAX [hidden, intermediate] => 转置
+#         MOE_EXPERT_UP = ((1, 0), (cfg.moe_intermediate_dim, cfg.emb_dim), False)
+#         # PyTorch 单个专家 Down: [hidden, intermediate] -> JAX [intermediate, hidden] => 转置
+#         MOE_EXPERT_DOWN = ((1, 0), (cfg.emb_dim, cfg.moe_intermediate_dim), False)
+
+#     # === 基于你的 structure_dump 严格校对的 Mapping ===
+#     mapping = {
+#         # === 全局部分 ===
+#         r"model\.word_embeddings\.weight": ("embedder.embedding", Transform.EMBED),
+#         r"lm_head\.weight": ("lm_head.w", Transform.LINEAR), # [修正] 加回 .w
+#         r"model\.norm\.weight": ("final_norm.scale", Transform.SCALE),
+        
+#         # === Attention & Norms (所有层通用) ===
+#         # 注意：Attention 的内部投影全都有 .w
+#         r"model\.layers\.([0-9]+)\.attention\.dense\.weight": (r"layers.\1.attn.o_proj.w", Transform.ATTN_OUT),
+#         # QKV 会被特殊逻辑拦截，这里的 target 仅作参考前缀
+#         r"model\.layers\.([0-9]+)\.attention\.query_key_value\.weight": (r"layers.\1.attn.qkv_proj", Transform.ATTN_QKV),
+        
+#         # Norms
+#         r"model\.layers\.([0-9]+)\.attention\.query_layernorm\.weight": (r"layers.\1.attn.q_norm.scale", Transform.SCALE),
+#         r"model\.layers\.([0-9]+)\.attention\.key_layernorm\.weight": (r"layers.\1.attn.k_norm.scale", Transform.SCALE),
+#         r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (r"layers.\1.input_layernorm.scale", Transform.SCALE),
+#         r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (r"layers.\1.post_attention_layernorm.scale", Transform.SCALE),
+#     }
+
+#     # === Layer 0: Dense MLP (Einsum 结构，有 .w) ===
+#     mapping.update({
+#         r"model\.layers\.0\.mlp\.gate_proj\.weight": (r"layers.0.mlp.gate_proj.w", Transform.LINEAR), # [修正] 加回 .w
+#         r"model\.layers\.0\.mlp\.up_proj\.weight": (r"layers.0.mlp.up_proj.w", Transform.LINEAR),     # [修正] 加回 .w
+#         r"model\.layers\.0\.mlp\.down_proj\.weight": (r"layers.0.mlp.down_proj.w", Transform.LINEAR), # [修正] 加回 .w
+#     })
+
+#     # === Layer 1-19: MoE layers ===
+    
+#     # 1. Shared Expert (Einsum 结构，有 .w)
+#     mapping.update({
+#         r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.gate_proj\.weight": (r"layers.\1.mlp.shared_expert.gate_proj.w", Transform.LINEAR), # [修正] 路径补全+加 .w
+#         r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.up_proj\.weight": (r"layers.\1.mlp.shared_expert.up_proj.w", Transform.LINEAR),     # [修正] 路径补全+加 .w
+#         r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.down_proj\.weight": (r"layers.\1.mlp.shared_expert.down_proj.w", Transform.LINEAR), # [修正] 路径补全+加 .w
+#     })
+
+#     # 2. Router (nnx.Param 结构，无 .w，直接是叶子)
+#     mapping.update({
+#         r"model\.layers\.([1-9]|1[0-9])\.mlp\.gate\.weight": (r"layers.\1.mlp.router", Transform.MOE_ROUTER), # [修正] 改名 gate->router，无 .w
+#         # 你的结构里 router 没有 bias，如果源文件有 bias，这个映射会报错 KeyNotFound。
+#         # 如果确定不需要 bias，可以在循环里把 expert_bias 的处理注释掉，或者保留这里但它会因为匹配不到 JAX key 而被忽略/报错
+#         # r"model\.layers\.([1-9]|1[0-9])\.mlp\.gate\.expert_bias": (r"layers.\1.mlp.router.bias", Transform.MOE_ROUTER_BIAS), 
+#     })
+
+#     # 3. Routed Experts (nnx.Param 结构，直接是堆叠的大张量，无 .w)
+#     # 目标键名直接指向 layers.X.mlp.experts_gate_proj
+#     mapping.update({
+#         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.gate_proj\.weight": (r"layers.\1.mlp.experts_gate_proj", Transform.MOE_EXPERT_UP),
+#         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.up_proj\.weight": (r"layers.\1.mlp.experts_up_proj", Transform.MOE_EXPERT_UP),
+#         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.down_proj\.weight": (r"layers.\1.mlp.experts_down_proj", Transform.MOE_EXPERT_DOWN),
+#     })
+
+#     return mapping, Transform
+
+
+# def _find_matching_rule(mapping, source_key):
+#     for pat, (repl, transform) in mapping.items():
+#         match = re.fullmatch(pat, source_key)
+#         if match:
+#             return repl, transform, match
+#     return None, None, None
+
+
+# def _assign_weights(keys, tensor, state_dict, st_key, transform, sharding_dict):
+#     key, *rest = keys
+    
+#     if key not in state_dict:
+#         raise KeyError(f"Key '{key}' not found. Current path segment: {st_key}. Available: {list(state_dict.keys())}")
+
+#     if not rest:
+#         # 这里的 state_dict[key] 应该是 ShapeDtypeStruct (叶子)
+        
+#         # Transform Logic
+#         if transform is not None and transform.value is not None:
+#             permute, reshape, reshape_first = transform.value
+#             if reshape_first and reshape is not None:
+#                 tensor = tensor.reshape(reshape)
+#             if permute:
+#                 tensor = tensor.transpose(permute)
+#             if not reshape_first and reshape is not None:
+#                 tensor = tensor.reshape(reshape)
+        
+#         target_shape = state_dict[key].shape
+#         if tensor.shape != target_shape:
+#             # 自动处理 Transpose (补救措施)
+#             if tensor.shape[::-1] == target_shape:
+#                 print(f"  [Auto-Transpose] {st_key}: {tensor.shape} -> {target_shape}")
+#                 tensor = tensor.T
+#             else:
+#                 raise ValueError(f"Shape mismatch for {st_key}: Loaded {tensor.shape} vs Expected {target_shape}")
+        
+#         if sharding_dict is not None:
+#             state_dict[key] = jax.device_put(tensor, sharding_dict[key])
+#         else:
+#             state_dict[key] = jax.device_put(tensor)
+#     else:
+#         current_node = state_dict[key]
+#         if hasattr(current_node, 'shape') and not isinstance(current_node, dict):
+#              raise TypeError(f"Path too deep! Attempted to access '{rest[0]}' inside '{key}', but '{key}' is already a leaf node. Check mapping for .w suffix issues.")
+             
+#         next_sharding = sharding_dict[key] if sharding_dict is not None else None
+#         _assign_weights(rest, tensor, current_node, st_key, transform, next_sharding)
+
+
+# def _assign_partial_expert(keys, sub_tensor, expert_idx, state_dict, transform, sharding_dict=None):
+#     node = state_dict
+#     sharding_node = sharding_dict
+    
+#     # 这里的 keys 应该直接指向 experts_gate_proj (叶子)
+#     # 例如: ['layers', '1', 'mlp', 'experts_gate_proj']
+    
+#     path_debug = []
+#     for k in keys[:-1]:
+#         if k not in node:
+#              raise KeyError(f"MoE Path Error: '{k}' not found. Path: {path_debug}. Available: {list(node.keys())}")
+#         node = node[k]
+#         path_debug.append(k)
+#         if sharding_node: sharding_node = sharding_node[k]
+    
+#     last_key = keys[-1]
+#     if last_key not in node:
+#          raise KeyError(f"MoE Leaf Error: '{last_key}' not found. Path: {path_debug}. Available: {list(node.keys())}")
+
+#     target_tensor = node[last_key] # 这应该是 ShapeDtypeStruct
+
+#     # Transform (Individual Expert)
+#     if transform is not None and transform.value is not None:
+#         permute, reshape, reshape_first = transform.value
+#         if permute:
+#             sub_tensor = sub_tensor.transpose(permute)
+
+#     # Lazy Initialization
+#     if hasattr(target_tensor, 'shape') and not isinstance(target_tensor, (np.ndarray, jax.Array)):
+#         full_shape = target_tensor.shape
+#         dtype = target_tensor.dtype
+#         # print(f"  [Init MoE Buffer] {'.'.join(str(k) for k in keys)} shape={full_shape}")
+#         node[last_key] = np.zeros(full_shape, dtype=dtype)
+#         target_tensor = node[last_key]
+
+#     # Assign slice
+#     # JAX MoE tensor shape: [num_experts, ..., ...]
+#     # 所以第一个维度是 expert_idx
+#     try:
+#         target_tensor[expert_idx] = sub_tensor
+#     except IndexError:
+#         raise IndexError(f"Expert Index {expert_idx} out of bounds for tensor with shape {target_tensor.shape}")
+#     except ValueError as e:
+#          raise ValueError(f"MoE Assignment Error for Expert {expert_idx}: Target slice shape {target_tensor[expert_idx].shape} vs Source {sub_tensor.shape}. Error: {e}")
+
+
+# def _stoi(s):
+#     try:
+#         return int(s)
+#     except ValueError:
+#         return s
+
+
+# def create_model_from_safe_tensors(file_dir: str, cfg: model_lib.ModelConfig, mesh: jax.sharding.Mesh | None = None):
+#     files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
+#     if not files:
+#         raise ValueError(f"No safetensors found in {file_dir}")
+
+#     print("Initializing model skeleton...")
+#     ling2_mini = nnx.eval_shape(lambda: model_lib.Ling2_mini(cfg, rngs=nnx.Rngs(params=0)))
+#     graph_def, abs_state = nnx.split(ling2_mini)
+#     state_dict = abs_state.to_pure_dict()
+    
+#     sharding = nnx.get_named_sharding(abs_state, mesh).to_pure_dict() if mesh is not None else None
+#     mapping, TransformEnum = _get_key_and_transform_mapping(cfg)
+#     conversion_errors = []
+
+#     print(f"Start loading weights from {len(files)} files...")
+    
+#     for f in files:
+#         with safetensors.safe_open(f, framework="numpy") as sf:
+#             for torch_key in sf.keys():
+#                 tensor = sf.get_tensor(torch_key)
+#                 repl_pattern, transform, match = _find_matching_rule(mapping, torch_key)
+                
+#                 if not match: 
+#                     # 忽略 bias 报错
+#                     if "bias" in torch_key and "expert_bias" in torch_key:
+#                         continue
+#                     continue
+
+#                 # Case 1: QKV Splitting
+#                 if "query_key_value" in torch_key:
+#                     layer_idx = int(match.group(1))
+#                     head_dim = cfg.head_dim
+#                     num_heads = cfg.num_heads
+#                     num_kv_heads = cfg.num_kv_heads
+#                     q_dim = num_heads * head_dim
+#                     kv_dim = num_kv_heads * head_dim
+                    
+#                     q, k, v = np.split(tensor, [q_dim, q_dim + kv_dim], axis=0)
+                    
+#                     q_path = ["layers", layer_idx, "attn", "q_proj", "w"]
+#                     k_path = ["layers", layer_idx, "attn", "k_proj", "w"]
+#                     v_path = ["layers", layer_idx, "attn", "v_proj", "w"]
+                    
+#                     q_trans = (TransformEnum.ATTN_QKV.value[0], (cfg.num_heads, cfg.head_dim, cfg.emb_dim), True)
+#                     kv_trans = (TransformEnum.ATTN_QKV.value[0], (cfg.num_kv_heads, cfg.head_dim, cfg.emb_dim), True)
+
+#                     class TempTransform: pass
+#                     t_q = TempTransform(); t_q.value = q_trans
+#                     t_kv = TempTransform(); t_kv.value = kv_trans
+
+#                     try:
+#                         _assign_weights(q_path, q, state_dict, torch_key + "_Q", t_q, sharding)
+#                         _assign_weights(k_path, k, state_dict, torch_key + "_K", t_kv, sharding)
+#                         _assign_weights(v_path, v, state_dict, torch_key + "_V", t_kv, sharding)
+#                     except Exception as e:
+#                         conversion_errors.append(f"QKV Split Error {torch_key}: {e}")
+#                     continue
+
+#                 # Case 2: MoE Experts
+#                 if len(match.groups()) == 2 and "experts" in torch_key and "shared" not in torch_key:
+#                     layer_idx = int(match.group(1))
+#                     expert_idx = int(match.group(2))
+#                     jax_key_str = match.expand(repl_pattern)
+#                     keys = [_stoi(k) for k in jax_key_str.split(".")]
+                    
+#                     try:
+#                         _assign_partial_expert(keys, tensor, expert_idx, state_dict, transform, sharding)
+#                     except Exception as e:
+#                         conversion_errors.append(f"MoE Expert Assign Error {torch_key}: {e}")
+#                     continue
+
+#                 # Case 3: Standard
+#                 jax_key_str = match.expand(repl_pattern)
+#                 keys = [_stoi(k) for k in jax_key_str.split(".")]
+#                 try:
+#                     _assign_weights(keys, tensor, state_dict, torch_key, transform, sharding)
+#                 except Exception as e:
+#                     conversion_errors.append(f"Standard Assign Error '{torch_key}' -> '{jax_key_str}': {e}")
+        
+#         gc.collect()
+
+#     if conversion_errors:
+#         full_error_log = "\n".join(conversion_errors[:30])
+#         raise RuntimeError(f"Encountered {len(conversion_errors)} errors. First 30:\n{full_error_log}")
+
+#     if cfg.tie_word_embeddings:
+#         # 修正: lm_head.w 和 embedder.embedding
+#         state_dict["lm_head"]["w"] = state_dict["embedder"]["embedding"].T
+    
+#     gc.collect()
+#     print("Merging state dict into model graph...")
+#     return nnx.merge(graph_def, state_dict)
 import gc
 import re
 import os
@@ -10,88 +298,52 @@ from etils import epath
 from flax import nnx
 import modeling as model_lib
 
-
-
+# ... (Transform Enum 和 _get_key_and_transform_mapping 保持不变) ...
+# ... (不过建议确认一下 MOE_ROUTER 是否真的需要转置，通常 Linear 都要) ...
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
+    # ... (你的原有代码) ...
     class Transform(Enum):
         BIAS = None
-        # PyTorch Linear 通常是 [out, in]，JAX 是 [in, out]，需要转置 (1, 0)
         LINEAR = ((1, 0), None, False) 
         EMBED = None
-        # Attention: QKV 在这里定义基本规则，具体拆分在主循环逻辑中
         ATTN_QKV = ((2, 0, 1), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), True)
         ATTN_OUT = ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), False)
         SCALE = None
-        
-        # MoE Router: PyTorch [hidden, experts] -> JAX [hidden, experts] (通常不需要转置，视具体模型而定)
-        # 你的结构显示 router: (2048, 64)，如果 PyTorch 也是 (2048, 64) 则为 None；如果是 (64, 2048) 则为 (1,0)
-        # Qwen/DeepSeek 通常 router 不需要转置，或者视 safetensors 实际形状而定。
-        # 这里暂定 MOE_ROUTER = None，如果报错形状不匹配，改为 ((1, 0), None, False)
-        # MOE_ROUTER = None 
-        MOE_ROUTER_BIAS = None
-        MOE_ROUTER = ((1, 0), None, False)
-        # MoE Experts: 单个专家的权重处理
-        # PyTorch 单个专家 Gate/Up: [intermediate, hidden] -> JAX [hidden, intermediate] => 转置
+        MOE_ROUTER = ((1, 0), None, False) # 建议保持转置，除非你确定它是 [hidden, experts]
         MOE_EXPERT_UP = ((1, 0), (cfg.moe_intermediate_dim, cfg.emb_dim), False)
-        # PyTorch 单个专家 Down: [hidden, intermediate] -> JAX [intermediate, hidden] => 转置
         MOE_EXPERT_DOWN = ((1, 0), (cfg.emb_dim, cfg.moe_intermediate_dim), False)
 
-    # === 基于你的 structure_dump 严格校对的 Mapping ===
+    # ... (Mapping 字典保持不变) ...
+    # 为了节省篇幅，这里省略 Mapping 定义，假设你原来的代码是正确的
+    # ...
+    
+    # === 补充 Mapping 代码 (复制你的原代码即可) ===
     mapping = {
-        # === 全局部分 ===
         r"model\.word_embeddings\.weight": ("embedder.embedding", Transform.EMBED),
-        r"lm_head\.weight": ("lm_head.w", Transform.LINEAR), # [修正] 加回 .w
+        r"lm_head\.weight": ("lm_head.w", Transform.LINEAR),
         r"model\.norm\.weight": ("final_norm.scale", Transform.SCALE),
-        
-        # === Attention & Norms (所有层通用) ===
-        # 注意：Attention 的内部投影全都有 .w
         r"model\.layers\.([0-9]+)\.attention\.dense\.weight": (r"layers.\1.attn.o_proj.w", Transform.ATTN_OUT),
-        # QKV 会被特殊逻辑拦截，这里的 target 仅作参考前缀
         r"model\.layers\.([0-9]+)\.attention\.query_key_value\.weight": (r"layers.\1.attn.qkv_proj", Transform.ATTN_QKV),
-        
-        # Norms
         r"model\.layers\.([0-9]+)\.attention\.query_layernorm\.weight": (r"layers.\1.attn.q_norm.scale", Transform.SCALE),
         r"model\.layers\.([0-9]+)\.attention\.key_layernorm\.weight": (r"layers.\1.attn.k_norm.scale", Transform.SCALE),
         r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (r"layers.\1.input_layernorm.scale", Transform.SCALE),
         r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (r"layers.\1.post_attention_layernorm.scale", Transform.SCALE),
-    }
-
-    # === Layer 0: Dense MLP (Einsum 结构，有 .w) ===
-    mapping.update({
-        r"model\.layers\.0\.mlp\.gate_proj\.weight": (r"layers.0.mlp.gate_proj.w", Transform.LINEAR), # [修正] 加回 .w
-        r"model\.layers\.0\.mlp\.up_proj\.weight": (r"layers.0.mlp.up_proj.w", Transform.LINEAR),     # [修正] 加回 .w
-        r"model\.layers\.0\.mlp\.down_proj\.weight": (r"layers.0.mlp.down_proj.w", Transform.LINEAR), # [修正] 加回 .w
-    })
-
-    # === Layer 1-19: MoE layers ===
-    
-    # 1. Shared Expert (Einsum 结构，有 .w)
-    mapping.update({
-        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.gate_proj\.weight": (r"layers.\1.mlp.shared_expert.gate_proj.w", Transform.LINEAR), # [修正] 路径补全+加 .w
-        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.up_proj\.weight": (r"layers.\1.mlp.shared_expert.up_proj.w", Transform.LINEAR),     # [修正] 路径补全+加 .w
-        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.down_proj\.weight": (r"layers.\1.mlp.shared_expert.down_proj.w", Transform.LINEAR), # [修正] 路径补全+加 .w
-    })
-
-    # 2. Router (nnx.Param 结构，无 .w，直接是叶子)
-    mapping.update({
-        r"model\.layers\.([1-9]|1[0-9])\.mlp\.gate\.weight": (r"layers.\1.mlp.router", Transform.MOE_ROUTER), # [修正] 改名 gate->router，无 .w
-        # 你的结构里 router 没有 bias，如果源文件有 bias，这个映射会报错 KeyNotFound。
-        # 如果确定不需要 bias，可以在循环里把 expert_bias 的处理注释掉，或者保留这里但它会因为匹配不到 JAX key 而被忽略/报错
-        # r"model\.layers\.([1-9]|1[0-9])\.mlp\.gate\.expert_bias": (r"layers.\1.mlp.router.bias", Transform.MOE_ROUTER_BIAS), 
-    })
-
-    # 3. Routed Experts (nnx.Param 结构，直接是堆叠的大张量，无 .w)
-    # 目标键名直接指向 layers.X.mlp.experts_gate_proj
-    mapping.update({
+        r"model\.layers\.0\.mlp\.gate_proj\.weight": (r"layers.0.mlp.gate_proj.w", Transform.LINEAR),
+        r"model\.layers\.0\.mlp\.up_proj\.weight": (r"layers.0.mlp.up_proj.w", Transform.LINEAR),
+        r"model\.layers\.0\.mlp\.down_proj\.weight": (r"layers.0.mlp.down_proj.w", Transform.LINEAR),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.gate_proj\.weight": (r"layers.\1.mlp.shared_expert.gate_proj.w", Transform.LINEAR),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.up_proj\.weight": (r"layers.\1.mlp.shared_expert.up_proj.w", Transform.LINEAR),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.shared_experts\.down_proj\.weight": (r"layers.\1.mlp.shared_expert.down_proj.w", Transform.LINEAR),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.gate\.weight": (r"layers.\1.mlp.router", Transform.MOE_ROUTER),
         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.gate_proj\.weight": (r"layers.\1.mlp.experts_gate_proj", Transform.MOE_EXPERT_UP),
         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.up_proj\.weight": (r"layers.\1.mlp.experts_up_proj", Transform.MOE_EXPERT_UP),
         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.down_proj\.weight": (r"layers.\1.mlp.experts_down_proj", Transform.MOE_EXPERT_DOWN),
-    })
+    }
 
     return mapping, Transform
 
-
+# ... (_find_matching_rule, _stoi 保持不变) ...
 def _find_matching_rule(mapping, source_key):
     for pat, (repl, transform) in mapping.items():
         match = re.fullmatch(pat, source_key)
@@ -99,105 +351,87 @@ def _find_matching_rule(mapping, source_key):
             return repl, transform, match
     return None, None, None
 
+def _stoi(s):
+    try: return int(s)
+    except: return s
 
+# ... (_assign_weights 保持不变) ...
 def _assign_weights(keys, tensor, state_dict, st_key, transform, sharding_dict):
     key, *rest = keys
-    
     if key not in state_dict:
-        raise KeyError(f"Key '{key}' not found. Current path segment: {st_key}. Available: {list(state_dict.keys())}")
-
+        raise KeyError(f"Key '{key}' not found.")
+    
     if not rest:
-        # 这里的 state_dict[key] 应该是 ShapeDtypeStruct (叶子)
-        
         # Transform Logic
         if transform is not None and transform.value is not None:
             permute, reshape, reshape_first = transform.value
-            if reshape_first and reshape is not None:
-                tensor = tensor.reshape(reshape)
-            if permute:
-                tensor = tensor.transpose(permute)
-            if not reshape_first and reshape is not None:
-                tensor = tensor.reshape(reshape)
+            if reshape_first and reshape is not None: tensor = tensor.reshape(reshape)
+            if permute: tensor = tensor.transpose(permute)
+            if not reshape_first and reshape is not None: tensor = tensor.reshape(reshape)
         
         target_shape = state_dict[key].shape
         if tensor.shape != target_shape:
-            # 自动处理 Transpose (补救措施)
             if tensor.shape[::-1] == target_shape:
                 print(f"  [Auto-Transpose] {st_key}: {tensor.shape} -> {target_shape}")
                 tensor = tensor.T
             else:
-                raise ValueError(f"Shape mismatch for {st_key}: Loaded {tensor.shape} vs Expected {target_shape}")
+                raise ValueError(f"Shape mismatch {st_key}: {tensor.shape} vs {target_shape}")
         
+        # 直接上设备
         if sharding_dict is not None:
             state_dict[key] = jax.device_put(tensor, sharding_dict[key])
         else:
             state_dict[key] = jax.device_put(tensor)
     else:
         current_node = state_dict[key]
-        if hasattr(current_node, 'shape') and not isinstance(current_node, dict):
-             raise TypeError(f"Path too deep! Attempted to access '{rest[0]}' inside '{key}', but '{key}' is already a leaf node. Check mapping for .w suffix issues.")
-             
-        next_sharding = sharding_dict[key] if sharding_dict is not None else None
+        next_sharding = sharding_dict[key] if sharding_dict else None
         _assign_weights(rest, tensor, current_node, st_key, transform, next_sharding)
 
-
+# ... (_assign_partial_expert 保持不变，但移除了 sharding 逻辑，只负责填 CPU Buffer) ...
 def _assign_partial_expert(keys, sub_tensor, expert_idx, state_dict, transform, sharding_dict=None):
     node = state_dict
-    sharding_node = sharding_dict
-    
-    # 这里的 keys 应该直接指向 experts_gate_proj (叶子)
-    # 例如: ['layers', '1', 'mlp', 'experts_gate_proj']
-    
-    path_debug = []
     for k in keys[:-1]:
-        if k not in node:
-             raise KeyError(f"MoE Path Error: '{k}' not found. Path: {path_debug}. Available: {list(node.keys())}")
         node = node[k]
-        path_debug.append(k)
-        if sharding_node: sharding_node = sharding_node[k]
-    
     last_key = keys[-1]
-    if last_key not in node:
-         raise KeyError(f"MoE Leaf Error: '{last_key}' not found. Path: {path_debug}. Available: {list(node.keys())}")
+    target_tensor = node[last_key]
 
-    target_tensor = node[last_key] # 这应该是 ShapeDtypeStruct
-
-    # Transform (Individual Expert)
     if transform is not None and transform.value is not None:
-        permute, reshape, reshape_first = transform.value
-        if permute:
-            sub_tensor = sub_tensor.transpose(permute)
+        permute, reshape, _ = transform.value
+        if permute: sub_tensor = sub_tensor.transpose(permute)
 
-    # Lazy Initialization
+    # Lazy Init (CPU numpy array)
     if hasattr(target_tensor, 'shape') and not isinstance(target_tensor, (np.ndarray, jax.Array)):
-        full_shape = target_tensor.shape
-        dtype = target_tensor.dtype
-        # print(f"  [Init MoE Buffer] {'.'.join(str(k) for k in keys)} shape={full_shape}")
-        node[last_key] = np.zeros(full_shape, dtype=dtype)
+        node[last_key] = np.zeros(target_tensor.shape, dtype=target_tensor.dtype)
         target_tensor = node[last_key]
+    
+    # Fill Buffer
+    target_tensor[expert_idx] = sub_tensor
 
-    # Assign slice
-    # JAX MoE tensor shape: [num_experts, ..., ...]
-    # 所以第一个维度是 expert_idx
-    try:
-        target_tensor[expert_idx] = sub_tensor
-    except IndexError:
-        raise IndexError(f"Expert Index {expert_idx} out of bounds for tensor with shape {target_tensor.shape}")
-    except ValueError as e:
-         raise ValueError(f"MoE Assignment Error for Expert {expert_idx}: Target slice shape {target_tensor[expert_idx].shape} vs Source {sub_tensor.shape}. Error: {e}")
-
-
-def _stoi(s):
-    try:
-        return int(s)
-    except ValueError:
-        return s
-
+# === 新增函数：递归清理剩下的 Numpy 数组 ===
+def _finalize_moe_sharding(state_dict, sharding_dict):
+    """
+    遍历 state_dict，找到所有还是 np.ndarray 的节点（即 MoE 权重），
+    并将它们移动到 TPU 上（应用 sharding）。
+    """
+    if isinstance(state_dict, dict):
+        for k, v in state_dict.items():
+            s_val = sharding_dict[k] if sharding_dict and k in sharding_dict else None
+            
+            if isinstance(v, np.ndarray):
+                # 这是一个在 CPU 上组装好的 MoE 权重，现在上设备
+                if s_val is not None:
+                    # print(f"Finalizing Sharding for {k}: {v.shape} -> Mesh")
+                    state_dict[k] = jax.device_put(v, s_val)
+                else:
+                    state_dict[k] = jax.device_put(v)
+            elif isinstance(v, dict):
+                # 递归
+                _finalize_moe_sharding(v, s_val)
+            # 如果是 jax.Array，说明已经在加载循环里 device_put 过了，跳过
 
 def create_model_from_safe_tensors(file_dir: str, cfg: model_lib.ModelConfig, mesh: jax.sharding.Mesh | None = None):
     files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
-    if not files:
-        raise ValueError(f"No safetensors found in {file_dir}")
+    if not files: raise ValueError(f"No safetensors found in {file_dir}")
 
     print("Initializing model skeleton...")
     ling2_mini = nnx.eval_shape(lambda: model_lib.Ling2_mini(cfg, rngs=nnx.Rngs(params=0)))
@@ -213,79 +447,82 @@ def create_model_from_safe_tensors(file_dir: str, cfg: model_lib.ModelConfig, me
     for f in files:
         with safetensors.safe_open(f, framework="numpy") as sf:
             for torch_key in sf.keys():
-                tensor = sf.get_tensor(torch_key)
-                repl_pattern, transform, match = _find_matching_rule(mapping, torch_key)
-                
-                if not match: 
-                    # 忽略 bias 报错
-                    if "bias" in torch_key and "expert_bias" in torch_key:
+                try:
+                    tensor = sf.get_tensor(torch_key)
+                    repl_pattern, transform, match = _find_matching_rule(mapping, torch_key)
+                    
+                    if not match: continue
+
+                    # Case 1: QKV Splitting
+                    if "query_key_value" in torch_key:
+                        layer_idx = int(match.group(1))
+                        head_dim = cfg.head_dim
+                        num_heads = cfg.num_heads
+                        num_kv_heads = cfg.num_kv_heads
+                        q_dim = num_heads * head_dim
+                        
+                        # Split numpy array
+                        q, k, v = np.split(tensor, [q_dim, q_dim + num_kv_heads * head_dim], axis=0)
+                        
+                        # 构造临时 transform
+                        t_q = type('obj', (object,), {'value': (TransformEnum.ATTN_QKV.value[0], (num_heads, head_dim, cfg.emb_dim), True)})
+                        t_kv = type('obj', (object,), {'value': (TransformEnum.ATTN_QKV.value[0], (num_kv_heads, head_dim, cfg.emb_dim), True)})
+
+                        _assign_weights(["layers", layer_idx, "attn", "q_proj", "w"], q, state_dict, torch_key+"_Q", t_q, sharding)
+                        _assign_weights(["layers", layer_idx, "attn", "k_proj", "w"], k, state_dict, torch_key+"_K", t_kv, sharding)
+                        _assign_weights(["layers", layer_idx, "attn", "v_proj", "w"], v, state_dict, torch_key+"_V", t_kv, sharding)
                         continue
-                    continue
 
-                # Case 1: QKV Splitting
-                if "query_key_value" in torch_key:
-                    layer_idx = int(match.group(1))
-                    head_dim = cfg.head_dim
-                    num_heads = cfg.num_heads
-                    num_kv_heads = cfg.num_kv_heads
-                    q_dim = num_heads * head_dim
-                    kv_dim = num_kv_heads * head_dim
-                    
-                    q, k, v = np.split(tensor, [q_dim, q_dim + kv_dim], axis=0)
-                    
-                    q_path = ["layers", layer_idx, "attn", "q_proj", "w"]
-                    k_path = ["layers", layer_idx, "attn", "k_proj", "w"]
-                    v_path = ["layers", layer_idx, "attn", "v_proj", "w"]
-                    
-                    q_trans = (TransformEnum.ATTN_QKV.value[0], (cfg.num_heads, cfg.head_dim, cfg.emb_dim), True)
-                    kv_trans = (TransformEnum.ATTN_QKV.value[0], (cfg.num_kv_heads, cfg.head_dim, cfg.emb_dim), True)
+                    # Case 2: MoE Experts (Fill CPU Buffer)
+                    if len(match.groups()) == 2 and "experts" in torch_key and "shared" not in torch_key:
+                        layer_idx = int(match.group(1))
+                        expert_idx = int(match.group(2))
+                        jax_key_str = match.expand(repl_pattern)
+                        keys = [_stoi(k) for k in jax_key_str.split(".")]
+                        _assign_partial_expert(keys, tensor, expert_idx, state_dict, transform, sharding)
+                        continue
 
-                    class TempTransform: pass
-                    t_q = TempTransform(); t_q.value = q_trans
-                    t_kv = TempTransform(); t_kv.value = kv_trans
-
-                    try:
-                        _assign_weights(q_path, q, state_dict, torch_key + "_Q", t_q, sharding)
-                        _assign_weights(k_path, k, state_dict, torch_key + "_K", t_kv, sharding)
-                        _assign_weights(v_path, v, state_dict, torch_key + "_V", t_kv, sharding)
-                    except Exception as e:
-                        conversion_errors.append(f"QKV Split Error {torch_key}: {e}")
-                    continue
-
-                # Case 2: MoE Experts
-                if len(match.groups()) == 2 and "experts" in torch_key and "shared" not in torch_key:
-                    layer_idx = int(match.group(1))
-                    expert_idx = int(match.group(2))
+                    # Case 3: Standard (Direct to TPU)
                     jax_key_str = match.expand(repl_pattern)
                     keys = [_stoi(k) for k in jax_key_str.split(".")]
-                    
-                    try:
-                        _assign_partial_expert(keys, tensor, expert_idx, state_dict, transform, sharding)
-                    except Exception as e:
-                        conversion_errors.append(f"MoE Expert Assign Error {torch_key}: {e}")
-                    continue
-
-                # Case 3: Standard
-                jax_key_str = match.expand(repl_pattern)
-                keys = [_stoi(k) for k in jax_key_str.split(".")]
-                try:
                     _assign_weights(keys, tensor, state_dict, torch_key, transform, sharding)
+
                 except Exception as e:
-                    conversion_errors.append(f"Standard Assign Error '{torch_key}' -> '{jax_key_str}': {e}")
+                    conversion_errors.append(f"Error loading {torch_key}: {e}")
         
+        # 每加载完一个文件进行 GC
         gc.collect()
 
     if conversion_errors:
-        full_error_log = "\n".join(conversion_errors[:30])
-        raise RuntimeError(f"Encountered {len(conversion_errors)} errors. First 30:\n{full_error_log}")
+        raise RuntimeError(f"Errors:\n" + "\n".join(conversion_errors[:10]))
 
+    # === [关键修复 1] 最终化 MoE 权重：从 CPU 搬运到 TPU ===
+    print("Finalizing MoE weights sharding...")
+    _finalize_moe_sharding(state_dict, sharding)
+    gc.collect() # 释放 CPU 上的大数组
+
+    # === [关键修复 2] 正确处理 Tie Embeddings 的 Sharding ===
     if cfg.tie_word_embeddings:
-        # 修正: lm_head.w 和 embedder.embedding
-        state_dict["lm_head"]["w"] = state_dict["embedder"]["embedding"].T
-    
-    gc.collect()
+        print("Tying embeddings...")
+        # 注意：这里不能简单赋值，因为 lm_head 可能有不同的 sharding spec
+        # embedder.embedding 已经在设备上了
+        emb_tensor = state_dict["embedder"]["embedding"]
+        
+        # 获取 lm_head 的 sharding
+        lm_head_sharding = sharding["lm_head"]["w"] if sharding else None
+        
+        # 转置
+        tied_w = emb_tensor.T
+        
+        # 显式 device_put 到 lm_head 的 sharding 上
+        if lm_head_sharding:
+             state_dict["lm_head"]["w"] = jax.device_put(tied_w, lm_head_sharding)
+        else:
+             state_dict["lm_head"]["w"] = tied_w
+
     print("Merging state dict into model graph...")
     return nnx.merge(graph_def, state_dict)
+
 
 if __name__ == "__main__":
     import os

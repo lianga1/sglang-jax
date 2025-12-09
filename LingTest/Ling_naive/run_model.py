@@ -1,17 +1,4 @@
 
-# Copyright 2025 The JAX Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import math
 import time
@@ -69,7 +56,7 @@ def run_model():
     
     # 执行搬运
     tokens = jax.device_put(tokens, input_sharding)
-    generate_steps = 1000
+    generate_steps = 100
     model = params.create_model_from_safe_tensors(model_ckpt_path, config, mesh)
     cache = model.init_cache(config, batch_size, token_len, generate_steps)
 
@@ -86,7 +73,15 @@ def run_model():
     finished = jnp.zeros((batch_size,), dtype=jnp.bool_)
     for i in range(generate_steps):
         logits, cache = modeling.forward(model, cache, next_tokens, tokenizer.pad_token_id)
+        print("Step:", i)
+        print("Logits:", logits)
+        print(f"Step {i}: cur_ind = {cache[0].cur_ind.value}") # 检查是否在增加
+        print(f"Logits stats: Min={logits.min()}, Max={logits.max()}, NaN?={jnp.any(jnp.isnan(logits))}")
+        # print("Cache keys shape:", )
+        
         next_tokens = jit_sampler(logits, key=key)
+
+        print("Next tokens:", next_tokens)
         finished = finished | (next_tokens.squeeze(-1) == tokenizer.eos_token_id)
         tokens_list.append(next_tokens)
         if finished.all():
