@@ -1,7 +1,7 @@
 conda deactivate
 source ./.venv/bin/activate
 pip install transformers 
-uv pip install libtpu, tpu-info
+uv pip install libtpu tpu-info
 uv pip install jaxtyping
 chmod a+x ./hfd.sh
 
