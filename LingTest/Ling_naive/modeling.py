@@ -25,7 +25,7 @@ class ShardingCfg:
     rms_norm: ShardingSpec
     act_btd: ShardingSpec
     act_btf: ShardingSpec
-    act_btnh: ShardingSpec
+    act_bnth: ShardingSpec
     # MoE sharding specs
     gate_weight: ShardingSpec  # [D, E]
     # Expert weights: [Experts, In, Out] or [Experts, Out, In]
@@ -47,7 +47,7 @@ class ShardingCfg:
             rms_norm=P(None),
             act_btd=P(None, None, None),
             act_btf=P(None, None, None),
-            act_btnh=P(None, None, None, None),
+            act_bnth=P(None, None, None, None),
             gate_weight=P(None, None),
             expert_weight_edf=P(None, None, None),
             expert_weight_efd=P(None, None, None),
@@ -60,13 +60,13 @@ class ShardingCfg:
             emb_dv=P("fsdp", "tp"),
             q_weight_ndh=P("tp", "fsdp", None),
             kv_weight_ndh=P("tp", "fsdp", None),
-            o_weight_nhd=P("tp", None, "fsdp"),
+            o_weight_nhd=P("tp", "fsdp"),
             ffw_weight_df=P("fsdp", "tp"),
             ffw_weight_fd=P("tp", "fsdp"),
             rms_norm=P("tp"),
             act_btd=P("fsdp", None, "tp"),
             act_btf=P("fsdp", None, "tp"),
-            act_btnh=P("fsdp", None, "tp", None),
+            act_bnth=P("fsdp", "tp", None, None),
             # MoE Sharding
             gate_weight=P(None, None),  # Router通常较小，复制到所有设备
             # Expert Parallel (EP): 专家维度切分
@@ -136,15 +136,19 @@ def shard(x: jnp.ndarray, s: ShardingSpec):
 
 class LayerCache(nnx.Module):
     def __init__(self, cfg: ModelConfig, batch_size: int, cache_size: int, dtype: jnp.dtype):
-        cache_shape = (batch_size, cache_size, cfg.num_kv_heads, cfg.head_dim)
-        self.k_cache = shard(nnx.Cache(jnp.zeros(cache_shape, dtype=dtype)), cfg.shd_cfg.act_btnh)
-        self.v_cache = shard(nnx.Cache(jnp.zeros(cache_shape, dtype=dtype)), cfg.shd_cfg.act_btnh)
+        cache_shape = (batch_size,  cfg.num_kv_heads, cache_size, cfg.head_dim)
+        self.k_cache = shard(nnx.Cache(jnp.zeros(cache_shape, dtype=dtype)), cfg.shd_cfg.act_bnth)
+        self.v_cache = shard(nnx.Cache(jnp.zeros(cache_shape, dtype=dtype)), cfg.shd_cfg.act_bnth)
         self.size = self.k_cache.shape[1]
         # Batch维度sharding
-        batch_sharding = P(cfg.shd_cfg.act_btnh[0]) if cfg.shd_cfg.act_btnh else P(None)
+        batch_sharding = P(cfg.shd_cfg.act_bnth[0]) if cfg.shd_cfg.act_bnth else P(None)
         self.start_ind = shard(nnx.Variable(-1 * jnp.ones((batch_size,), dtype=jnp.int32)), batch_sharding)
-        self.cur_ind = nnx.Variable(jnp.zeros((), dtype=jnp.int32)) 
-
+        self.cur_ind = nnx.Variable(jnp.zeros((), dtype=jnp.int32))
+    def update_cache(self,key,value,slice_indices):
+        
+        self.v_cache.value = jax.lax.dynamic_update_slice(self.v_cache.value, value, slice_indices)
+        self.k_cache.value = jax.lax.dynamic_update_slice(self.k_cache.value, key, slice_indices)
+        
 Cache: TypeAlias = list[LayerCache]
 
 
@@ -160,19 +164,84 @@ class Einsum(nnx.Module):
 
 
 # --- RoPE Utilities ---
-def _generate_pos_embeddings(positions: jax.Array, head_dim: int, rope_theta: int) -> tuple[jax.Array, jax.Array]:
-    fraction = jnp.arange(0, head_dim, 2, dtype=jnp.float32) / head_dim
-    timescale = rope_theta**fraction
-    rotational_frequency = 1.0 / timescale
-    sinusoid_inp = jnp.einsum("BT,k->BTk", positions, rotational_frequency, precision=jax.lax.Precision.HIGHEST)
-    return jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)
+def _generate_pos_embeddings(positions: jax.Array, head_dim: int, rope_theta: int, partial_rotary_factor = 0.5) -> tuple[jax.Array, jax.Array]:
+    # fraction = jnp.arange(0, head_dim, 2, dtype=jnp.float32) / head_dim
+    rotary_dim = int(head_dim * partial_rotary_factor)
+    
+    # 2. 计算逆频率 (Inverse Frequencies)
+    # 注意：这里使用 rotary_dim 进行计算
+    freq_exponents = jnp.arange(0, rotary_dim, 2, dtype=jnp.float32)
+    inv_freq = 1.0 / (rope_theta ** (freq_exponents / rotary_dim))
+    
+    # 3. 计算频率嵌入
+    # positions: (..., S) -> (..., S, 1)
+    # inv_freq: (D/2,) -> (1, D/2)
+    # freqs: (..., S, D/2)
+    freqs = positions[..., None].astype(jnp.float32) * inv_freq
+    
+    # 4. 拼接 (Concatenation)
+    # PyTorch: cat((freqs, freqs), dim=-1)
+    # 结果维度将是 rotary_dim (即 64)
+    emb = jnp.concatenate([freqs, freqs], axis=-1)
+    
+    cos = jnp.cos(emb).astype(jnp.bfloat16)
+    sin = jnp.sin(emb).astype(jnp.bfloat16)
+    
+    return cos, sin
 
 def apply_rope(x: jax.Array, sin: jax.Array, cos: jax.Array) -> jax.Array:
-    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
-    sin, cos = sin[:, :, None, :], cos[:, :, None, :]
-    return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1).astype(x.dtype)
+    # x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+    # sin, cos = sin[:,None,:,:], cos[:, None, :, :]
+    # rotary_dim = cos.shape[-1]
+    # x_rot , x_pass = x[..., : rotary_dim], x[... , rotary_dim:]
+    # x1_h = x_rot[..., :x_rot.shape[-1]//2]
+    # x2_h = -x_rot[..., x_rot.shape[-1]//2 : ]
+    
+    # rotate_half = jnp.concatenate([x2_h,x1_h],axis = -1)
+   
+    # x_embed = (x_rot * cos) + (rotate_half *sin)
+    # x_embed =  jnp.concatenate([x_embed,x_pass],axis = -1)
+    # return x_embed.astype(x.dtype)
+    # return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1).astype(x.dtype)
+    sin, cos = sin[:, None, :, :], cos[:, None, :, :]
+    rotary_dim = cos.shape[-1]
+    x_rot, x_pass = x[..., : rotary_dim], x[..., rotary_dim:]
 
+    # 2. 关键：模拟 PyTorch 的计算流
+    # PyTorch 在 BF16 模式下，往往会在算子入口处隐式 Upcast，或者 Tensor Core 内部使用 FP32 累加
+    # 我们在这里显式地做这件事，并且强制分离乘法和加法，破坏 FMA 融合
+    
+    # Cast 输入到 FP32
+    x_rot_f32 = x_rot.astype(jnp.float32)
+    sin_f32 = sin.astype(jnp.float32)
+    cos_f32 = cos.astype(jnp.float32)
+
+    # 构造 rotate_half 的部分
+    x1_f32 = x_rot_f32[..., : rotary_dim // 2]
+    x2_f32 = x_rot_f32[..., rotary_dim // 2 :]
+    # PyTorch: torch.cat((-x2, x1), dim=-1)
+    # 显式模拟 PyTorch 的取负操作
+    rotate_half_f32 = jnp.concatenate([-x2_f32, x1_f32], axis=-1)
+
+    # 3. 分步计算 (防止 XLA 将其融合为 FMA，模仿 PyTorch Eager 的分步执行)
+    # PyTorch Eager: term1 = x * cos; term2 = rot * sin; out = term1 + term2
+    term1 = x_rot_f32 * cos_f32
+    term2 = rotate_half_f32 * sin_f32
+    
+    # 显式截断：有些 PyTorch 算子可能在每一步乘法后都做了一次舍入（虽然不常见，但值得一试）
+    # 如果上面 FP32 累加还对不上，可以尝试把下面两行取消注释，模拟纯 BF16 算子链
+    # term1 = term1.astype(jnp.bfloat16).astype(jnp.float32)
+    # term2 = term2.astype(jnp.bfloat16).astype(jnp.float32)
+
+    x_embed_f32 = term1 + term2
+
+    # 4. 转回 BF16
+    x_embed = x_embed_f32.astype(x.dtype)
+    
+    return jnp.concatenate([x_embed, x_pass], axis=-1)
 # --- Layers ---
+
+
 
 class RMSNorm(nnx.Module):
     def __init__(self, dim: int, cfg: ModelConfig, *, rngs: nnx.Rngs):
@@ -201,7 +270,7 @@ class Attention(nnx.Module):
             "BSD,DKH->BSKH", (cfg.emb_dim, cfg.num_kv_heads, cfg.head_dim), shd=self.shd_cfg.kv_weight_ndh
         )
         self.o_proj = einsum_fn(
-            "BTNH,NHD->BTD", (cfg.num_heads, cfg.head_dim, cfg.emb_dim), shd=self.shd_cfg.o_weight_nhd
+            "BTI,ID->BTD", (cfg.num_heads* cfg.head_dim, cfg.emb_dim), shd=self.shd_cfg.o_weight_nhd
         )
         # Norms
         self.q_norm = RMSNorm(cfg.head_dim, cfg, rngs=rngs)
@@ -211,58 +280,94 @@ class Attention(nnx.Module):
         self.scale = cfg.head_dim**-0.5
         self.head_dim = cfg.head_dim
         self.num_kv_heads = cfg.num_kv_heads
-
+    def repeat_kv(self,kv,n_rep):
+        batch, num_kv_heads,slen , head_dim = kv.shape 
+        if n_rep == 1:
+            return kv
+        # kv = kv[:, :, None, :, :].expand(batch, slen, n_rep, num_kv_heads, head_dim)
+        kv = jnp.repeat(kv[:, :, None, :, :], n_rep, axis=2)
+        return kv.reshape(batch ,  num_kv_heads * n_rep, slen,  head_dim,out_sharding=self.shd_cfg.act_bnth)
     @jax.named_scope("attention")
     def __call__(self, x: Array, cache: LayerCache | None, segment_ids: Array) -> Array:
         # Projection & QK Norm
-        q = shard(self.q_norm(self.q_proj(x)), self.shd_cfg.act_btnh)
-        k = shard(self.k_norm(self.k_proj(x)), self.shd_cfg.act_btnh)
-        v = shard(self.v_proj(x), self.shd_cfg.act_btnh)
+        q = shard(self.q_norm(self.q_proj(x)).transpose((0,2,1,3)), self.shd_cfg.act_bnth)
+        k = shard(self.k_norm(self.k_proj(x)).transpose((0,2,1,3)), self.shd_cfg.act_bnth)
+        v = shard(self.v_proj(x).transpose((0,2,1,3)), self.shd_cfg.act_bnth)
 
         # RoPE
         # 计算位置编码需要 segment_ids
-        left_pads = count_left_pads(segment_ids)
-        if cache.start_ind.value is not None:
-             cache.start_ind.value = jnp.where(cache.start_ind.value < 0, left_pads, cache.start_ind.value)
+        # left_pads = count_left_pads(segment_ids)
+        # if cache.start_ind.value is not None:
+        #      cache.start_ind.value = jnp.where(cache.start_ind.value < 0, left_pads, cache.start_ind.value)
         
-        position_ids = compute_positions_from_segment_ids(segment_ids) + cache.cur_ind.value
-        sin, cos = _generate_pos_embeddings(position_ids, self.head_dim, 600000) # 这里硬编码了theta，实际应从cfg传
+        # position_ids = compute_positions_from_segment_ids(segment_ids) + cache.cur_ind.value
+        # sin, cos = _generate_pos_embeddings(position_ids, self.head_dim, 600000) # 这里硬编码了theta，实际应从cfg传
+        b, n,t, h = q.shape
+        
+        # 2. 生成简单的 range [0, 1, ..., t-1]，并加上当前的 cache 偏移量
+        # 形状保持为 [1, t]，这样后续计算出的 sin/cos 就是 [1, t, d]
+        # 注意：这里假设在这个阶段没有复杂的左填充(Left Padding)逻辑，或者 Transformer 那边也没处理左填充
+        current_pos = jnp.arange(t, dtype=jnp.int32)[None, :] + cache.cur_ind.value
+        position_ids = current_pos 
+
+        # 3. 注意：原来的 hardcoded 600000 最好改成 self.config.rope_theta
+        # 确保这里的 theta 与 transformers config 中的 rope_theta 一致
+        rope_theta = 600000
+        cos,sin = _generate_pos_embeddings(position_ids, self.head_dim, rope_theta)
         q = apply_rope(q, sin, cos)
         k = apply_rope(k, sin, cos)
 
         # Cache Update
         # slice_indices = jnp.array([0, cache.cur_ind.value, 0, 0], dtype=jnp.bfloat16)
+        #TODO: update kv and get value
+        
         slice_indices = (0, cache.cur_ind.value, 0, 0)
-        cache.v_cache.value = jax.lax.dynamic_update_slice(cache.v_cache.value, v, slice_indices)
-        cache.k_cache.value = jax.lax.dynamic_update_slice(cache.k_cache.value, k, slice_indices)
+        cache.update_cache(k,v,slice_indices)
+        # cache.v_cache.value = jax.lax.dynamic_update_slice(cache.v_cache.value, v, slice_indices)
+        # cache.k_cache.value = jax.lax.dynamic_update_slice(cache.k_cache.value, k, slice_indices)
+        if cache.cur_ind.value > 0:
+            k = cache.k_cache.value[:,:,:cache.cur_ind.value+t,:]
+            v = cache.v_cache.value[:,:,:cache.cur_ind.value+t,:]
         
+
         # GQA / Attention
-        b, t, n, h = q.shape
-        q_gqa = q.reshape((b, t, self.num_kv_heads, self.n_rep, h))
-        
+        # b, t, n, h = q.shape
+        # q_gqa = q.reshape((b, t, self.num_kv_heads, self.n_rep, h))
+        k = self.repeat_kv(k,self.n_rep)
+        v = self.repeat_kv(v,self.n_rep)
         # [B, T, K, G, H] * [B, S, K, H] -> [B, T, S, K, G]
-        attn_logits = jnp.einsum("BTKGH,BSKH->BTSKG", q_gqa, cache.k_cache.value) * self.scale
-        
+        # attn_logits = jnp.einsum("BTKGH,BSKH->BTSKG", q_gqa, cache.k_cache.value) * self.scale
+        # attn_logits = jnp.einsum("BTKGH,BSKH->BTSKG", q, cache.k_cache.value) * self.scale
+        attn_logits = jnp.matmul(q,k.transpose((0,1,3,2)))/math.sqrt(self.head_dim)
         # Masking
         q_pos = cache.cur_ind.value + jnp.arange(t, dtype=jnp.int32)[None, :] - cache.start_ind.value[:, None]
-        ts = jnp.arange(cache.size, dtype=jnp.int32)
+        ts = jnp.arange(cache.cur_ind.value+t, dtype=jnp.int32)
         kv_segment_ids = (ts[None, :] >= cache.start_ind.value[:, None]) & (ts[None, :] < cache.cur_ind.value + t)
         k_pos = ts[None, :] - cache.start_ind.value[:, None]
         
         causal_mask = k_pos[:, None, :] <= q_pos[:, :, None]
-        segment_mask = kv_segment_ids[:, None, :] == segment_ids[:, :, None]
-        final_mask = causal_mask & segment_mask
+        # segment_mask = kv_segment_ids[:, None, :] == segment_ids[:, :, None]
+        # final_mask = causal_mask & segment_mask
+        final_mask = causal_mask
+        attn_logits = jnp.where(final_mask[:, None, :, :,], attn_logits, _K_MASK)
         
-        attn_logits = jnp.where(final_mask[:, :, :, None, None], attn_logits, _K_MASK)
-        
-        attn_weights = jax.nn.softmax(attn_logits.astype(jnp.float32), axis=2).astype(attn_logits.dtype)
+        attn_weights = jax.nn.softmax(attn_logits.astype(jnp.float32), axis=3).astype(attn_logits.dtype)
         
         # [B, T, S, K, G] * [B, S, K, H] -> [B, T, K, G, H]
-        out = jnp.einsum("BTSKG,BSKH->BTKGH", attn_weights, cache.v_cache.value)
-        out = out.reshape((b, t, n, h))
+        # out = jnp.einsum("BTSKG,BSKH->BTKGH", attn_weights, cache.v_cache.value)
+        out = jnp.matmul(attn_weights, v)
+        # out = out.reshape((b, t, n, h))
+        # out = jnp.einsum("BTSKG,BSKH->BTKGH", attn_weights, cache.v_cache.value)
         
+        # 原代码：out = out.reshape((b, t, n, h)) 
+        # 修改为：直接拍平最后两维
+        out = out.transpose((0,2,1,3)).reshape((b, t, -1),out_sharding=self.shd_cfg.act_btd)  # 此时 Shape 变为 (2, 31, 2048)
+        
+        # 注意：这里传入 o_proj 的已经是 3D 张量了
         cache.cur_ind.value = cache.cur_ind.value + t
-        return shard(self.o_proj(out), self.shd_cfg.act_btd)
+        out = self.o_proj(out)
+        # return shard(self.o_proj(out), self.shd_cfg.act_btd)
+        return shard(out,self.shd_cfg.act_btd)
 
 
 class MLP(nnx.Module):

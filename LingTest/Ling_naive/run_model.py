@@ -33,16 +33,17 @@ def tokenize(tokenizer, input: list[str], shd: P | None = None):
 def run_model():
     # For sharding, you can use one of the following:
     # model_ckpt_path = snapshot_download("Qwen/Qwen3-0.6B")
-    model_ckpt_path = '/home/gcpuser/sky_workdir/sglang-jax/inclusionAI/Ling-mini-2.0'
+    model_ckpt_path = 'inclusionAI/Ling-mini-2.0'
     config = modeling.ModelConfig.ling_minimal(use_sharding=True)
     mesh, batch_shd = None, None
-    mesh = jax.make_mesh((2, 2), ("fsdp", "tp"), axis_types=(AxisType.Explicit, AxisType.Explicit))
+    # mesh = jax.make_mesh((2, 2), ("fsdp", "tp"), axis_types=(AxisType.Explicit, AxisType.Explicit))
     # Enable sharding below if you have mtuliple devices.
     # model_ckpt_path = snapshot_download("Qwen/Qwen3-4B")
     # config = modeling.ModelConfig.qwen3_4b(use_sharding=True)
-    # mesh = jax.make_mesh((2, 2), ("fsdp", "tp"), axis_types=(AxisType.Explicit, AxisType.Explicit))
+    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(AxisType.Explicit, AxisType.Explicit))
     batch_shd = P("fsdp", None)
     jax.set_mesh(mesh)
+    
 
     query = [
         "Why is the sky blue instead of any other color like purple?",
@@ -53,7 +54,7 @@ def run_model():
     tokens = tokenize(tokenizer, query, batch_shd)
     batch_size, token_len = tokens.shape
     input_sharding = NamedSharding(mesh, P('fsdp', None))
-    
+    # input_sharding = None
     # 执行搬运
     tokens = jax.device_put(tokens, input_sharding)
     generate_steps = 100
@@ -65,27 +66,28 @@ def run_model():
     jit_sampler = jax.jit(sampler)
 
     # prefill
-    logits, cache = modeling.forward(model, cache, tokens, tokenizer.pad_token_id)
-    next_tokens = jit_sampler(logits, key=key)
-
-    # decode
-    tokens_list = [next_tokens]
-    finished = jnp.zeros((batch_size,), dtype=jnp.bool_)
-    for i in range(generate_steps):
-        logits, cache = modeling.forward(model, cache, next_tokens, tokenizer.pad_token_id)
-        print("Step:", i)
-        print("Logits:", logits)
-        print(f"Step {i}: cur_ind = {cache[0].cur_ind.value}") # 检查是否在增加
-        print(f"Logits stats: Min={logits.min()}, Max={logits.max()}, NaN?={jnp.any(jnp.isnan(logits))}")
-        # print("Cache keys shape:", )
-        
+    with jax.disable_jit():
+        logits, cache = modeling.forward(model, cache, tokens, tokenizer.pad_token_id)
         next_tokens = jit_sampler(logits, key=key)
 
-        print("Next tokens:", next_tokens)
-        finished = finished | (next_tokens.squeeze(-1) == tokenizer.eos_token_id)
-        tokens_list.append(next_tokens)
-        if finished.all():
-            break
+        # decode
+        tokens_list = [next_tokens]
+        finished = jnp.zeros((batch_size,), dtype=jnp.bool_)
+        for i in range(generate_steps):
+            logits, cache = modeling.forward(model, cache, next_tokens, tokenizer.pad_token_id)
+            print("Step:", i)
+            print("Logits:", logits)
+            print(f"Step {i}: cur_ind = {cache[0].cur_ind.value}") # 检查是否在增加
+            print(f"Logits stats: Min={logits.min()}, Max={logits.max()}, NaN?={jnp.any(jnp.isnan(logits))}")
+            # print("Cache keys shape:", )
+            
+            next_tokens = jit_sampler(logits, key=key)
+
+            print("Next tokens:", next_tokens)
+            finished = finished | (next_tokens.squeeze(-1) == tokenizer.eos_token_id)
+            tokens_list.append(next_tokens)
+            if finished.all():
+                break
 
     all_output_tokens = jax.device_get(jnp.concatenate(tokens_list, axis=-1))
     for i, q in enumerate(query):

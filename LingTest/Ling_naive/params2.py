@@ -308,11 +308,13 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
         LINEAR = ((1, 0), None, False) 
         EMBED = None
         ATTN_QKV = ((2, 0, 1), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), True)
-        ATTN_OUT = ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), False)
+        # ATTN_OUT = ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.emb_dim), False)
+        ATTN_OUT = ((1,0),(cfg.num_heads * cfg.head_dim, cfg.emb_dim),True)
         SCALE = None
         MOE_ROUTER = ((1, 0), None, False) # 建议保持转置，除非你确定它是 [hidden, experts]
         MOE_EXPERT_UP = ((1, 0), (cfg.moe_intermediate_dim, cfg.emb_dim), False)
         MOE_EXPERT_DOWN = ((1, 0), (cfg.emb_dim, cfg.moe_intermediate_dim), False)
+        
 
     # ... (Mapping 字典保持不变) ...
     # 为了节省篇幅，这里省略 Mapping 定义，假设你原来的代码是正确的
