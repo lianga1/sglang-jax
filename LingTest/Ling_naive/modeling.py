@@ -95,7 +95,9 @@ class ModelConfig:
     shared_expert_dim: int      # Layer 1+ (Shared Expert) 的中间维度 (512)
     num_experts: int            # 专家数量 (256)
     num_experts_per_tok: int    # (8)
-    
+    n_group: int
+    topk_group: int
+    routed_scaling_factor: float
     shd_cfg: ShardingCfg = ShardingCfg.no_sharding()
 
     @classmethod
@@ -125,6 +127,9 @@ class ModelConfig:
             shared_expert_dim=512,                # 对应 config.moe_shared_expert_intermediate_size (用于 Shared)
             num_experts=256,                      # 对应 config.num_experts (你之前写了 64)
             num_experts_per_tok=8,
+            n_group = 8,
+            topk_group = 4,
+            routed_scaling_factor = 2.5
         )
 
 def shard(x: jnp.ndarray, s: ShardingSpec):
@@ -321,7 +326,7 @@ class Attention(nnx.Module):
         # slice_indices = jnp.array([0, cache.cur_ind.value, 0, 0], dtype=jnp.bfloat16)
         #TODO: update kv and get value
         
-        slice_indices = (0, cache.cur_ind.value, 0, 0)
+        slice_indices = (0,0, cache.cur_ind.value, 0)
         cache.update_cache(k,v,slice_indices)
         # cache.v_cache.value = jax.lax.dynamic_update_slice(cache.v_cache.value, v, slice_indices)
         # cache.k_cache.value = jax.lax.dynamic_update_slice(cache.k_cache.value, k, slice_indices)
@@ -401,21 +406,26 @@ class MoEMLP(nnx.Module):
         self.k = cfg.num_experts_per_tok
         self.dim = cfg.emb_dim
         self.hidden = cfg.moe_intermediate_dim # 使用 512
-        
+        self.n_group = getattr(cfg, "n_group", 1)
+        self.topk_group = getattr(cfg, "topk_group", 1)
+        self.scaling_factor = getattr(cfg, "routed_scaling_factor", 1.0)
         # 1. Router (Gate)
         # self.router = shard(
         #     nnx.Param(nnx.initializers.normal()(rngs.params(), (self.dim, self.num_experts))),
         #     cfg.shd_cfg.gate_weight
         # )
         init_fn = nnx.initializers.normal(stddev=0.02, dtype=jnp.bfloat16) 
-
+        zero_init = nnx.initializers.zeros_init()
         # 1. Router
         self.router = shard(
             nnx.Param(init_fn(rngs.params(), (self.dim, self.num_experts))),
             cfg.shd_cfg.gate_weight
         )
-        self.router_bias = None # 如果模型有bias需添加
-
+        # self.router_bias = None  # 如果模型有bias需添加
+        self.router_bias = shard(
+            nnx.Param(zero_init(rngs.params(), (self.num_experts,))),
+            P(None) 
+        )
         # 2. Shared Expert (Always active)
         # 假设共享专家使用 shared_expert_intermediate_dim，如果cfg没定义则用默认
         shared_dim = getattr(cfg, "shared_expert_intermediate_dim", cfg.moe_intermediate_dim)
@@ -435,30 +445,97 @@ class MoEMLP(nnx.Module):
             nnx.Param(init_fn(rngs.params(), (self.num_experts, self.hidden, self.dim))),
             cfg.shd_cfg.expert_weight_efd
         )
+    
+    def group_limited_topk(
+        self, 
+        routing_scores: jax.Array, 
+        raw_scores: jax.Array
+    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
+        """
+        Args:
+            routing_scores: 用于决定路由（选哪个专家）的分数，通常包含 Bias [Batch, Seq, Num_Experts]
+            raw_scores: 用于计算权重（乘多少）的分数，通常不含 Bias [Batch, Seq, Num_Experts]
+        Returns:
+            probs: 选中的专家的原始分数 (来自 raw_scores)
+            top_indices: 选中的专家ID (基于 routing_scores 计算)
+            topk_weights: 归一化后的权重
+        """
+        input_shape = routing_scores.shape
+        
+        # === 1. 基于 routing_scores 计算 Group Mask ===
+        # Reshape: [..., n_group, experts_per_group]
+        experts_per_group = self.num_experts // self.n_group
+        scores_grouped = routing_scores.reshape(input_shape[:-1] + (self.n_group, experts_per_group))
+        
+        # 组内 Top2 求和
+        group_top2_vals, _ = jax.lax.top_k(scores_grouped, 2)
+        group_scores = jnp.sum(group_top2_vals, axis=-1)
+        
+        # 选出 Top Groups
+        _, group_idx = jax.lax.top_k(group_scores, self.topk_group)
+        
+        # 生成 Mask
+        group_mask = jnp.sum(jax.nn.one_hot(group_idx, self.n_group), axis=-2)
+        score_mask = jnp.broadcast_to(group_mask[..., None], scores_grouped.shape).reshape(input_shape)
+        
+        # 应用 Mask 到 routing_scores
+        min_val = jnp.finfo(routing_scores.dtype).min
+        masked_routing_scores = jnp.where(score_mask > 0.5, routing_scores, min_val)
+        
+        # === 2. 确定 TopK Indices (基于 Mask 后的 Routing Scores) ===
+        # 这里只关心 indices
+        _, top_indices = jax.lax.top_k(masked_routing_scores, self.k)
+        
+        # === 3. 提取权重 (基于 Raw Scores) ===
+        # 使用上一步确定的 indices，从 raw_scores 中提取数值
+        # raw_scores: [B, T, E]
+        # top_indices: [B, T, K]
+        # probs: [B, T, K]
+        probs = jnp.take_along_axis(raw_scores, top_indices, axis=-1)
+        
+        # === 4. 归一化 ===
+        if self.k > 1:
+            denom = jnp.sum(probs, axis=-1, keepdims=True) + 1e-20
+            topk_weights = probs / denom
+        else:
+            topk_weights = jnp.ones_like(probs)
 
+        # 缩放
+        # topk_weights = topk_weights * self.scaling_factor
+        
+        return probs, top_indices, topk_weights.astype(raw_scores.dtype)
     @jax.named_scope("moe")
     def __call__(self, x: Array) -> Array:
         # x: [B, T, D]
+        
+        x1 = x.reshape(-1, x.shape[-1])
         
         # --- 1. Shared Expert Path ---
         shared_out = self.shared_expert(x)
         
         # --- 2. Router ---
-        router_logits = x @ self.router.value # [B, T, E]
-        scores = jax.nn.softmax(router_logits.astype(jnp.float32), axis=-1)
+        # router_logits = x1 @ self.router.value # [B, T, E]
+        router_logits = x1.astype(jnp.float32) @ self.router.value.astype(jnp.float32) 
+        
+        scores = jax.nn.sigmoid(router_logits.astype(jnp.float32)).astype(router_logits.dtype)
+        
+        scores_for_routing = scores + self.router_bias
+        _, topk_ids,topk_weights = self.group_limited_topk(scores_for_routing,scores)
+        # topk_weights = topk_weights* self.scaling_factor
         
         # Top-K
         # weights: [B, T, K], indices: [B, T, K]
-        topk_weights, topk_ids = jax.lax.top_k(scores, self.k)
+        # topk_weights, topk_ids = jax.lax.top_k(scores, self.k)
         
         # Normalize weights
         topk_weights = topk_weights / jnp.sum(topk_weights, axis=-1, keepdims=True)
+        topk_weights = topk_weights* self.scaling_factor
         topk_weights = topk_weights.astype(x.dtype)
 
         # --- 3. Vectorized Routed Computation ---
-        routed_out = self._compute_routed_experts(x, topk_ids, topk_weights)
+        routed_out = self._compute_routed_experts(x1, topk_ids, topk_weights)
         
-        return shared_out + routed_out
+        return shared_out + routed_out.reshape(shared_out.shape)
 
     def _compute_routed_experts(self, x: Array, topk_ids: Array, topk_weights: Array) -> Array:
         """
@@ -496,12 +573,12 @@ class MoEMLP(nnx.Module):
             # 2. 构造完整的 4维 Spec
             # cur_gate_w / cur_up_w: [B, T, D, F]
             # 我们希望 D 保持切分 ("tp")，F 不切分 (None)
-            spec_up = P(axis_b, axis_t, axis_d_up, None)
+            spec_up = P( axis_t, axis_d_up, None)
             
             # cur_down_w: [B, T, F, D]
             # [关键修正] 我们希望 F 不切分 (None)，D 保持切分 ("tp")
             # 之前你漏了最后一个参数，导致 D 变成了 None (复制)
-            spec_down = P(axis_b, axis_t, None, axis_d_down)
+            spec_down = P(axis_t, None, axis_d_down)
             
             # 3. 执行 Gather
             cur_gate_w = self.experts_gate_proj.value.at[expert_ids].get(out_sharding=spec_up)
@@ -512,17 +589,17 @@ class MoEMLP(nnx.Module):
             # 注意：spec_up 和 spec_down 也要传给 out_sharding 吗？
             # 不，Einsum 的 out_sharding 是针对输出结果的。
             # Gate/Up 输出 [B, T, F]，F 未切分 -> P("fsdp", None, None)
-            spec_out_intermediate = P(axis_b, axis_t, None)
+            spec_out_intermediate = P( axis_b, None)
             
             # Down 输出 [B, T, D]，D 切分 -> P("fsdp", None, "tp")
-            spec_out_final = P(axis_b, axis_t, axis_d_down)
+            spec_out_final = P(axis_b,  axis_d_down)
 
-            gate_out = jnp.einsum("btd,btdf->btf", x, cur_gate_w,out_sharding=spec_out_intermediate) # JAX 自动推导即可，或指定 out_sharding=spec_out_intermediate
-            up_out = jnp.einsum("btd,btdf->btf", x, cur_up_w,out_sharding=spec_out_intermediate)
+            gate_out = jnp.einsum("td,tdf->tf", x, cur_gate_w,out_sharding=spec_out_intermediate) # JAX 自动推导即可，或指定 out_sharding=spec_out_intermediate
+            up_out = jnp.einsum("td,tdf->tf", x, cur_up_w,out_sharding=spec_out_intermediate)
             
             hidden = nnx.silu(gate_out) * up_out
             
-            expert_out = jnp.einsum("btf,btfd->btd", hidden, cur_down_w,out_sharding=spec_out_final) # 自动推导结果应为 "tp" 切分
+            expert_out = jnp.einsum("tf,tfd->td", hidden, cur_down_w,out_sharding=spec_out_final) # 自动推导结果应为 "tp" 切分
             
             return expert_out * weights[..., None]
 

@@ -341,6 +341,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.gate_proj\.weight": (r"layers.\1.mlp.experts_gate_proj", Transform.MOE_EXPERT_UP),
         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.up_proj\.weight": (r"layers.\1.mlp.experts_up_proj", Transform.MOE_EXPERT_UP),
         r"model\.layers\.([1-9]|1[0-9])\.mlp\.experts\.([0-9]+)\.down_proj\.weight": (r"layers.\1.mlp.experts_down_proj", Transform.MOE_EXPERT_DOWN),
+        r"model\.layers\.([1-9]|1[0-9])\.mlp\.gate\.expert_bias":(r"layers.\1.mlp.router_bias",Transform.BIAS)
     }
 
     return mapping, Transform

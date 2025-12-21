@@ -12,7 +12,7 @@ from jax import P
 from jax.sharding import AxisType
 from transformers import AutoTokenizer
 
-import modeling
+import modeling as modeling
 import params2 as params
 from sampler import GreedySampler, Sampler
 from jax import NamedSharding
