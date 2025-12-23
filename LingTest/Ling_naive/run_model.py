@@ -40,7 +40,7 @@ def run_model():
     # Enable sharding below if you have mtuliple devices.
     # model_ckpt_path = snapshot_download("Qwen/Qwen3-4B")
     # config = modeling.ModelConfig.qwen3_4b(use_sharding=True)
-    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(AxisType.Explicit, AxisType.Explicit))
+    mesh = jax.make_mesh((2,2), ("fsdp", "tp"), axis_types=(AxisType.Explicit, AxisType.Explicit))
     batch_shd = P("fsdp", None)
     jax.set_mesh(mesh)
     
@@ -75,15 +75,15 @@ def run_model():
     finished = jnp.zeros((batch_size,), dtype=jnp.bool_)
     for i in range(generate_steps):
         logits, cache = modeling.forward(model, cache, next_tokens, tokenizer.pad_token_id)
-        print("Step:", i)
-        print("Logits:", logits)
-        print(f"Step {i}: cur_ind = {cache[0].cur_ind.value}") # 检查是否在增加
-        print(f"Logits stats: Min={logits.min()}, Max={logits.max()}, NaN?={jnp.any(jnp.isnan(logits))}")
+        # print("Step:", i)
+        # print("Logits:", logits)
+        # print(f"Step {i}: cur_ind = {cache[0].cur_ind.value}") # 检查是否在增加
+        # print(f"Logits stats: Min={logits.min()}, Max={logits.max()}, NaN?={jnp.any(jnp.isnan(logits))}")
         # print("Cache keys shape:", )
         
         next_tokens = jit_sampler(logits, key=key)
 
-        print("Next tokens:", next_tokens)
+        # print("Next tokens:", next_tokens)
         finished = finished | (next_tokens.squeeze(-1) == tokenizer.eos_token_id)
         tokens_list.append(next_tokens)
         if finished.all():

@@ -261,6 +261,7 @@ class RMSNorm(nnx.Module):
         rms = jnp.sqrt(jnp.mean(x_float ** 2, axis=-1, keepdims=True) + self.norm_eps)
         return jnp.astype(self.scale.value * x_float / rms, dtype)
 
+
 class Attention(nnx.Module):
     def __init__(self, cfg: ModelConfig, *, rngs: nnx.Rngs):
         self.shd_cfg = cfg.shd_cfg
@@ -275,7 +276,7 @@ class Attention(nnx.Module):
             "BSD,DKH->BSKH", (cfg.emb_dim, cfg.num_kv_heads, cfg.head_dim), shd=self.shd_cfg.kv_weight_ndh
         )
         self.o_proj = einsum_fn(
-            "BTI,ID->BTD", (cfg.num_heads* cfg.head_dim, cfg.emb_dim), shd=self.shd_cfg.o_weight_nhd
+            "BTI,ID->BTD", (cfg.num_heads * cfg.head_dim, cfg.emb_dim), shd=self.shd_cfg.o_weight_nhd
         )
         # Norms
         self.q_norm = RMSNorm(cfg.head_dim, cfg, rngs=rngs)
@@ -285,107 +286,112 @@ class Attention(nnx.Module):
         self.scale = cfg.head_dim**-0.5
         self.head_dim = cfg.head_dim
         self.num_kv_heads = cfg.num_kv_heads
-    def repeat_kv(self,kv,n_rep):
-        batch, num_kv_heads,slen , head_dim = kv.shape 
-        # if n_rep == 1:
-        #     return kv
-        # kv = kv[:, :, None, :, :].expand(batch, slen, n_rep, num_kv_heads, head_dim)
+        # 假设 config 中有 max_len，用于生成 mask
+        # self.max_len = cfg.max_len 
+        # self.max_len = 256
+    def repeat_kv(self, kv, n_rep):
+        # 移除 if n_rep == 1 的分支，利用 repeat 统一处理
+        # Input Shape: [Batch, Num_KV_Heads, Max_Len, Head_Dim]
+        batch, num_kv_heads, slen, head_dim = kv.shape 
+        
+        # 即使 n_rep 为 1，执行 repeat 也是安全的，JAX 编译器会优化
         kv = jnp.repeat(kv[:, :, None, :, :], n_rep, axis=2)
-        return kv.reshape(batch ,  num_kv_heads * n_rep, slen,  head_dim,out_sharding=self.shd_cfg.act_bnth)
+        
+        # Output Shape: [Batch, Num_Heads, Max_Len, Head_Dim]
+        return kv.reshape(batch, num_kv_heads * n_rep, slen, head_dim) # 注意这里不需要 out_sharding，除非必要
+
     @jax.named_scope("attention")
-    def __call__(self, x: Array, cache: LayerCache | None, segment_ids: Array) -> Array:
-        # Projection & QK Norm
-        q = shard(self.q_norm(self.q_proj(x)).transpose((0,2,1,3)), self.shd_cfg.act_bnth)
-        k = shard(self.k_norm(self.k_proj(x)).transpose((0,2,1,3)), self.shd_cfg.act_bnth)
-        v = shard(self.v_proj(x).transpose((0,2,1,3)), self.shd_cfg.act_bnth)
+    def __call__(self, x: jax.Array, cache: LayerCache | None, segment_ids: jax.Array) -> jax.Array:
+        # x shape: [Batch, Time, Dim]
 
-        # RoPE
-        # 计算位置编码需要 segment_ids
-        # left_pads = count_left_pads(segment_ids)
-        # if cache.start_ind.value is not None:
-        #      cache.start_ind.value = jnp.where(cache.start_ind.value < 0, left_pads, cache.start_ind.value)
+        b, t, d = x.shape
         
-        # position_ids = compute_positions_from_segment_ids(segment_ids) + cache.cur_ind.value
-        # sin, cos = _generate_pos_embeddings(position_ids, self.head_dim, 600000) # 这里硬编码了theta，实际应从cfg传
-        b, n,t, h = q.shape
-        
-        # 2. 生成简单的 range [0, 1, ..., t-1]，并加上当前的 cache 偏移量
-        # 形状保持为 [1, t]，这样后续计算出的 sin/cos 就是 [1, t, d]
-        # 注意：这里假设在这个阶段没有复杂的左填充(Left Padding)逻辑，或者 Transformer 那边也没处理左填充
+        # 1. Projection & Norm
+        # q: [B, N, T, H] (注意 transpose 后 T 在 dim 2)
+        q = shard(self.q_norm(self.q_proj(x)).transpose((0, 2, 1, 3)), self.shd_cfg.act_bnth)
+        k = shard(self.k_norm(self.k_proj(x)).transpose((0, 2, 1, 3)), self.shd_cfg.act_bnth)
+        v = shard(self.v_proj(x).transpose((0, 2, 1, 3)), self.shd_cfg.act_bnth)
+
+        # 2. RoPE
+        # 计算当前输入的绝对位置
+        # current_pos: [1, T] -> [B, T] (Broadcasting usually handles [1, T], but explicit is fine)
+        # cache.cur_ind.value 是一个 scalar tracer
         current_pos = jnp.arange(t, dtype=jnp.int32)[None, :] + cache.cur_ind.value
-        position_ids = current_pos 
-
-        # 3. 注意：原来的 hardcoded 600000 最好改成 self.config.rope_theta
-        # 确保这里的 theta 与 transformers config 中的 rope_theta 一致
-        rope_theta = 600000
-        cos,sin = _generate_pos_embeddings(position_ids, self.head_dim, rope_theta)
+        
+        rope_theta = 600000 # 建议改为 self.config.rope_theta
+        cos, sin = _generate_pos_embeddings(current_pos, self.head_dim, rope_theta)
+        
+        # 对当前的 Q 和 K 应用 RoPE
         q = apply_rope(q, sin, cos)
         k = apply_rope(k, sin, cos)
 
-        # Cache Update
-        # slice_indices = jnp.array([0, cache.cur_ind.value, 0, 0], dtype=jnp.bfloat16)
-        #TODO: update kv and get value
+        # 3. Cache Update (核心修改：使用 dynamic_update_slice)
+        # 此时 k, v 的 shape 为 [B, N_KV, T, H]
+        # cache.k_cache.value 的 shape 为 [B, N_KV, Max_Len, H]
         
-        slice_indices = (0,0, cache.cur_ind.value, 0)
-        cache.update_cache(k,v,slice_indices)
-        # cache.v_cache.value = jax.lax.dynamic_update_slice(cache.v_cache.value, v, slice_indices)
-        # cache.k_cache.value = jax.lax.dynamic_update_slice(cache.k_cache.value, k, slice_indices)
-        # if cache.cur_ind.value > 0:
-        k = cache.k_cache.value[:,:,:cache.cur_ind.value+t,:]
-        v = cache.v_cache.value[:,:,:cache.cur_ind.value+t,:]
+        # 构造插入的起始坐标: (0, 0, cur_ind, 0)
+        # 对应维度: (Batch, Head, Time, Dim)
+        start_indices = (0, 0, cache.cur_ind.value, 0)
+        
+        # 将当前的 k, v 写入到固定 buffer 的指定位置
+        # 这一步是 JIT 兼容的，不会导致重编译
+        k_full = jax.lax.dynamic_update_slice(cache.k_cache.value, k, start_indices)
+        v_full = jax.lax.dynamic_update_slice(cache.v_cache.value, v, start_indices)
+        
+        # 更新 nnx 状态中的 cache 值 (In-place semantic update for next step)
+        cache.k_cache.value = k_full
+        cache.v_cache.value = v_full
 
-        # prefill_slice = lambda _: (k, v)  #keep k v as is
-        # def decode_slice(_):
-        #     cache_start_indices = (0,0,0,0) # [:,:,:cache.cur_ind.value+t,:]
-        #     cache_slice_indices = (k_cache.shape[0],k_cache.shape[1],cache.cur_ind.value + t, k_cache.shape[3])
-        #     k = jax.lax.dynamic_slice(cache.k_cache.value,)
+        # 4. GQA Handling
+        # 对全量的 Cache 进行 repeat
+        # k_full: [B, N, Max_Len, H]
+        k_in = self.repeat_kv(k_full, self.n_rep)
+        v_in = self.repeat_kv(v_full, self.n_rep)
+
+        # 5. Calculate Attention Logits
+        # Q: [B, N, T, H]
+        # K: [B, N, Max_Len, H] -> Transpose -> [B, N, H, Max_Len]
+        # Logits: [B, N, T, Max_Len]
+        attn_logits = jnp.matmul(q, k_in.transpose((0, 1, 3, 2))) / math.sqrt(self.head_dim)
+
+        # 6. Masking (核心修改：统一 Mask 策略)
+        # 我们需要 Mask 掉两类数据：
+        #   a) Causal Mask: Q 不能看未来的 K (Key_Pos > Query_Pos)
+        #   b) Padding/Garbage Mask: Cache 中 cur_ind 之后的数据是旧的历史数据，不能看
         
-        # k,v = jax.lax.cond(
-        #     cache.cur_ind.value > 0,
-        #     prefill_slice,
-        #     decode_slice,
-        #     operand=None
-        # )
+        # 构造 Query 的位置索引: [1, 1, T, 1]
+        query_indices = current_pos[:, None, :, None] 
         
-        # GQA / Attention
-        # b, t, n, h = q.shape
-        # q_gqa = q.reshape((b, t, self.num_kv_heads, self.n_rep, h))
-        k = self.repeat_kv(k,self.n_rep)
-        v = self.repeat_kv(v,self.n_rep)
-        # [B, T, K, G, H] * [B, S, K, H] -> [B, T, S, K, G]
-        # attn_logits = jnp.einsum("BTKGH,BSKH->BTSKG", q_gqa, cache.k_cache.value) * self.scale
-        # attn_logits = jnp.einsum("BTKGH,BSKH->BTSKG", q, cache.k_cache.value) * self.scale
-        attn_logits = jnp.matmul(q,k.transpose((0,1,3,2)))/math.sqrt(self.head_dim)
-        # Masking
-        q_pos = cache.cur_ind.value + jnp.arange(t, dtype=jnp.int32)[None, :] - cache.start_ind.value[:, None]
-        ts = jnp.arange(cache.cur_ind.value+t, dtype=jnp.int32)
-        kv_segment_ids = (ts[None, :] >= cache.start_ind.value[:, None]) & (ts[None, :] < cache.cur_ind.value + t)
-        k_pos = ts[None, :] - cache.start_ind.value[:, None]
+        # 构造 Key 的位置索引: [1, 1, 1, Max_Len] (固定全长)
+        key_indices = jnp.arange(k_in.shape[2], dtype=jnp.int32)[None, None, None, :]
         
-        causal_mask = k_pos[:, None, :] <= q_pos[:, :, None]
-        # segment_mask = kv_segment_ids[:, None, :] == segment_ids[:, :, None]
-        # final_mask = causal_mask & segment_mask
-        final_mask = causal_mask
-        attn_logits = jnp.where(final_mask[:, None, :, :,], attn_logits, _K_MASK)
+        # 生成 Mask
+        # 逻辑：只要 Key 的位置小于等于 Query 的位置，就是合法的。
+        # 原理：
+        #   - 对于过去有效的 Cache: Key_Pos < Query_Pos (True)
+        #   - 对于当前步: Key_Pos == Query_Pos (True)
+        #   - 对于未来步 (Causal): Key_Pos > Query_Pos (False -> Masked)
+        #   - 对于 Cache 后面的 Garbage (未填充区域): 它们的 Index 肯定大于当前的 Query Index，所以也会被自动 Mask 掉。
+        mask = key_indices <= query_indices
         
-        attn_weights = jax.nn.softmax(attn_logits.astype(jnp.float32), axis=3).astype(attn_logits.dtype)
+        # 应用 Mask
+        attn_logits = jnp.where(mask, attn_logits, _K_MASK)
+
+        # 7. Softmax & Output
+        attn_weights = jax.nn.softmax(attn_logits.astype(jnp.float32), axis=-1).astype(attn_logits.dtype)
         
-        # [B, T, S, K, G] * [B, S, K, H] -> [B, T, K, G, H]
-        # out = jnp.einsum("BTSKG,BSKH->BTKGH", attn_weights, cache.v_cache.value)
-        out = jnp.matmul(attn_weights, v)
-        # out = out.reshape((b, t, n, h))
-        # out = jnp.einsum("BTSKG,BSKH->BTKGH", attn_weights, cache.v_cache.value)
+        # Out: [B, N, T, H]
+        out = jnp.matmul(attn_weights, v_in)
         
-        # 原代码：out = out.reshape((b, t, n, h)) 
-        # 修改为：直接拍平最后两维
-        out = out.transpose((0,2,1,3)).reshape((b, t, -1),out_sharding=self.shd_cfg.act_btd)  # 此时 Shape 变为 (2, 31, 2048)
+        # 8. Post-processing
+        # 拍平最后两维: [B, N, T, H] -> [B, T, N, H] -> [B, T, N*H]
+        out = out.transpose((0, 2, 1, 3)).reshape((b, t, -1)) # out_sharding 可以在这里加
         
-        # 注意：这里传入 o_proj 的已经是 3D 张量了
+        # 9. Update Step Counter
         cache.cur_ind.value = cache.cur_ind.value + t
-        out = self.o_proj(out)
-        # return shard(self.o_proj(out), self.shd_cfg.act_btd)
-        return shard(out,self.shd_cfg.act_btd)
-
+        
+        # 10. Output Projection
+        return shard(self.o_proj(out), self.shd_cfg.act_btd)
 
 class MLP(nnx.Module):
     """Standard Dense MLP (SwiGLU)"""
