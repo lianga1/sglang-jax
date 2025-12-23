@@ -287,8 +287,8 @@ class Attention(nnx.Module):
         self.num_kv_heads = cfg.num_kv_heads
     def repeat_kv(self,kv,n_rep):
         batch, num_kv_heads,slen , head_dim = kv.shape 
-        if n_rep == 1:
-            return kv
+        # if n_rep == 1:
+        #     return kv
         # kv = kv[:, :, None, :, :].expand(batch, slen, n_rep, num_kv_heads, head_dim)
         kv = jnp.repeat(kv[:, :, None, :, :], n_rep, axis=2)
         return kv.reshape(batch ,  num_kv_heads * n_rep, slen,  head_dim,out_sharding=self.shd_cfg.act_bnth)
@@ -330,11 +330,23 @@ class Attention(nnx.Module):
         cache.update_cache(k,v,slice_indices)
         # cache.v_cache.value = jax.lax.dynamic_update_slice(cache.v_cache.value, v, slice_indices)
         # cache.k_cache.value = jax.lax.dynamic_update_slice(cache.k_cache.value, k, slice_indices)
-        if cache.cur_ind.value > 0:
-            k = cache.k_cache.value[:,:,:cache.cur_ind.value+t,:]
-            v = cache.v_cache.value[:,:,:cache.cur_ind.value+t,:]
-        
+        # if cache.cur_ind.value > 0:
+        k = cache.k_cache.value[:,:,:cache.cur_ind.value+t,:]
+        v = cache.v_cache.value[:,:,:cache.cur_ind.value+t,:]
 
+        # prefill_slice = lambda _: (k, v)  #keep k v as is
+        # def decode_slice(_):
+        #     cache_start_indices = (0,0,0,0) # [:,:,:cache.cur_ind.value+t,:]
+        #     cache_slice_indices = (k_cache.shape[0],k_cache.shape[1],cache.cur_ind.value + t, k_cache.shape[3])
+        #     k = jax.lax.dynamic_slice(cache.k_cache.value,)
+        
+        # k,v = jax.lax.cond(
+        #     cache.cur_ind.value > 0,
+        #     prefill_slice,
+        #     decode_slice,
+        #     operand=None
+        # )
+        
         # GQA / Attention
         # b, t, n, h = q.shape
         # q_gqa = q.reshape((b, t, self.num_kv_heads, self.n_rep, h))

@@ -66,28 +66,28 @@ def run_model():
     jit_sampler = jax.jit(sampler)
 
     # prefill
-    with jax.disable_jit():
-        logits, cache = modeling.forward(model, cache, tokens, tokenizer.pad_token_id)
+# with jax.disable_jit():
+    logits, cache = modeling.forward(model, cache, tokens, tokenizer.pad_token_id)
+    next_tokens = jit_sampler(logits, key=key)
+
+    # decode
+    tokens_list = [next_tokens]
+    finished = jnp.zeros((batch_size,), dtype=jnp.bool_)
+    for i in range(generate_steps):
+        logits, cache = modeling.forward(model, cache, next_tokens, tokenizer.pad_token_id)
+        print("Step:", i)
+        print("Logits:", logits)
+        print(f"Step {i}: cur_ind = {cache[0].cur_ind.value}") # 检查是否在增加
+        print(f"Logits stats: Min={logits.min()}, Max={logits.max()}, NaN?={jnp.any(jnp.isnan(logits))}")
+        # print("Cache keys shape:", )
+        
         next_tokens = jit_sampler(logits, key=key)
 
-        # decode
-        tokens_list = [next_tokens]
-        finished = jnp.zeros((batch_size,), dtype=jnp.bool_)
-        for i in range(generate_steps):
-            logits, cache = modeling.forward(model, cache, next_tokens, tokenizer.pad_token_id)
-            print("Step:", i)
-            print("Logits:", logits)
-            print(f"Step {i}: cur_ind = {cache[0].cur_ind.value}") # 检查是否在增加
-            print(f"Logits stats: Min={logits.min()}, Max={logits.max()}, NaN?={jnp.any(jnp.isnan(logits))}")
-            # print("Cache keys shape:", )
-            
-            next_tokens = jit_sampler(logits, key=key)
-
-            print("Next tokens:", next_tokens)
-            finished = finished | (next_tokens.squeeze(-1) == tokenizer.eos_token_id)
-            tokens_list.append(next_tokens)
-            if finished.all():
-                break
+        print("Next tokens:", next_tokens)
+        finished = finished | (next_tokens.squeeze(-1) == tokenizer.eos_token_id)
+        tokens_list.append(next_tokens)
+        if finished.all():
+            break
 
     all_output_tokens = jax.device_get(jnp.concatenate(tokens_list, axis=-1))
     for i, q in enumerate(query):
